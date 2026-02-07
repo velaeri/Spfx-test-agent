@@ -1,0 +1,53 @@
+{
+  "name": "spfx-test-agent",
+  "displayName": "SPFX Test Agent",
+  "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Chat",
+    "Testing"
+  ],
+  "extensionDependencies": [
+    "GitHub.copilot-chat"
+  ],
+  "activationEvents": [],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "spfx-tester",
+        "name": "spfx-tester",
+        "description": "Automated test generation agent for SharePoint Framework projects with self-healing capabilities",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "generate",
+            "description": "Generate and heal unit tests for an SPFx component"
+          }
+        ]
+      }
+    ]
+  },
+  "main": "./dist/extension.js",
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
+  },
+  "dependencies": {}
+}

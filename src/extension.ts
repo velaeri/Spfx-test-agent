@@ -110,11 +110,16 @@ async function handleChatRequest(
             
             stream.markdown(`\n❌ **Error:** ${errorMessage}\n\n`);
             
+            // Log full error for debugging
+            console.error('TestAgent error:', error);
+            
             // Provide helpful guidance for common errors
             if (errorMessage.includes('Jest')) {
                 stream.markdown('💡 **Tip:** Make sure Jest is installed: `npm install --save-dev jest @types/jest ts-jest`\n');
             } else if (errorMessage.includes('Copilot') || errorMessage.includes('model')) {
                 stream.markdown('💡 **Tip:** Ensure GitHub Copilot is installed and you are signed in.\n');
+            } else if (errorMessage.includes('Rate limit')) {
+                stream.markdown('💡 **Tip:** Rate limit exceeded. Wait a few minutes and try again.\n');
             }
 
             return { errorDetails: { message: errorMessage } };

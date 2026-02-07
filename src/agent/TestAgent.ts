@@ -63,6 +63,9 @@ export class TestAgent {
 
         // Self-healing loop
         let attempt = 1;
+        let rateLimitRetries = 0;
+        const maxRateLimitRetries = 5;
+        
         while (!result.success && attempt < this.maxAttempts) {
             attempt++;
             
@@ -88,10 +91,15 @@ export class TestAgent {
 
                 // Run the test again
                 result = await this.testRunner.runTest(testFilePath, workspaceRoot);
+                rateLimitRetries = 0; // Reset rate limit counter on success
             } catch (error) {
                 if (this.isRateLimitError(error)) {
-                    stream.markdown(`⏸️ Rate limit encountered. Waiting before retry...\n\n`);
-                    await this.sleep(5000); // Wait 5 seconds for rate limit
+                    rateLimitRetries++;
+                    if (rateLimitRetries >= maxRateLimitRetries) {
+                        throw new Error('Rate limit exceeded. Please try again later.');
+                    }
+                    stream.markdown(`⏸️ Rate limit encountered (retry ${rateLimitRetries}/${maxRateLimitRetries}). Waiting...\n\n`);
+                    await this.sleep(5000 * rateLimitRetries); // Exponential backoff for rate limits
                     attempt--; // Don't count this as a real attempt
                     continue;
                 }
@@ -258,7 +266,8 @@ Return the complete FIXED test file code.`;
      */
     private extractCodeFromMarkdown(text: string): string {
         // Look for code blocks with typescript, tsx, ts, or javascript
-        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\n([\s\S]*?)```/;
+        // Make pattern flexible to handle variations in whitespace
+        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\s*([\s\S]*?)\s*```/;
         const match = text.match(codeBlockRegex);
         
         if (match) {

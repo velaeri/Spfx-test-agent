@@ -102,6 +102,7 @@ export class JestLogParser {
 
     /**
      * Extracts test summary information from Jest output
+     * Handles multiple Jest output formats
      * 
      * @param jestOutput - Raw Jest output
      * @returns Object with test statistics
@@ -114,16 +115,44 @@ export class JestLogParser {
     } {
         const cleaned = this.removeAnsiCodes(jestOutput);
         
-        // Look for test summary line like "Tests:       1 failed, 1 total"
-        const summaryMatch = cleaned.match(/Tests:\s+(?:(\d+)\s+failed[,\s]+)?(?:(\d+)\s+passed[,\s]+)?(?:(\d+)\s+skipped[,\s]+)?(\d+)\s+total/);
+        // Try multiple patterns to match different Jest output formats
+        // Pattern 1: "Tests:       1 failed, 1 total"
+        // Pattern 2: "Tests: 1 failed, 2 passed, 3 total"
+        // Pattern 3: "failed: 1, passed: 2, total: 3"
         
-        if (summaryMatch) {
-            return {
-                failed: parseInt(summaryMatch[1] || '0'),
-                passed: parseInt(summaryMatch[2] || '0'),
-                skipped: parseInt(summaryMatch[3] || '0'),
-                total: parseInt(summaryMatch[4] || '0')
-            };
+        const patterns = [
+            /Tests:\s+(?:(\d+)\s+failed[,\s]+)?(?:(\d+)\s+passed[,\s]+)?(?:(\d+)\s+skipped[,\s]+)?(\d+)\s+total/i,
+            /failed:\s*(\d+)[,\s]+passed:\s*(\d+)[,\s]+total:\s*(\d+)/i,
+            /(\d+)\s+failed[,\s]+(\d+)\s+passed[,\s]+(\d+)\s+total/i
+        ];
+        
+        for (const pattern of patterns) {
+            const match = cleaned.match(pattern);
+            if (match) {
+                // Handle different capture group arrangements
+                if (pattern === patterns[0]) {
+                    return {
+                        failed: parseInt(match[1] || '0'),
+                        passed: parseInt(match[2] || '0'),
+                        skipped: parseInt(match[3] || '0'),
+                        total: parseInt(match[4] || '0')
+                    };
+                } else if (pattern === patterns[1]) {
+                    return {
+                        failed: parseInt(match[1] || '0'),
+                        passed: parseInt(match[2] || '0'),
+                        skipped: 0,
+                        total: parseInt(match[3] || '0')
+                    };
+                } else {
+                    return {
+                        failed: parseInt(match[1] || '0'),
+                        passed: parseInt(match[2] || '0'),
+                        skipped: 0,
+                        total: parseInt(match[3] || '0')
+                    };
+                }
+            }
         }
 
         return { total: 0, passed: 0, failed: 0, skipped: 0 };

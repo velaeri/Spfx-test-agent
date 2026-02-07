@@ -1,22 +1,32 @@
 {
   "name": "spfx-test-agent",
   "displayName": "SPFX Test Agent",
-  "description": "A VS Code chat participant extension for SPFX testing assistance",
+  "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Chat"
+    "Chat",
+    "Testing"
+  ],
+  "extensionDependencies": [
+    "GitHub.copilot-chat"
   ],
   "activationEvents": [],
   "contributes": {
     "chatParticipants": [
       {
-        "id": "spfx-test-agent.chat",
-        "name": "spfx",
-        "description": "SPFX Test Agent - Your assistant for SharePoint Framework testing",
-        "isSticky": true
+        "id": "spfx-tester",
+        "name": "spfx-tester",
+        "description": "Automated test generation agent for SharePoint Framework projects with self-healing capabilities",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "generate",
+            "description": "Generate and heal unit tests for an SPFx component"
+          }
+        ]
       }
     ]
   },

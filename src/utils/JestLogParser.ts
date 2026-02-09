@@ -1,3 +1,5 @@
+import { ConfigService } from '../services/ConfigService';
+
 /**
  * JestLogParser - Utility to clean and extract relevant information from Jest output
  * 
@@ -92,9 +94,10 @@ export class JestLogParser {
 
         const result = processedSections.join('\n\n---\n\n');
 
-        // Limit total length to avoid excessive token usage (around 1500 chars = ~400 tokens)
-        if (result.length > 1500) {
-            return result.substring(0, 1500) + '\n... (output truncated)';
+        // Limit total length to avoid excessive token usage (configurable)
+        const maxLength = ConfigService.get('maxTokensPerError', 1500);
+        if (result.length > maxLength) {
+            return result.substring(0, maxLength) + '\n... (output truncated)';
         }
 
         return result;

@@ -3,22 +3,51 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { TestRunner } from '../utils/TestRunner';
 import { JestLogParser } from '../utils/JestLogParser';
+import { ILLMProvider } from '../interfaces/ILLMProvider';
+import { CopilotProvider } from '../providers/CopilotProvider';
+import { Logger } from '../services/Logger';
+import { ConfigService } from '../services/ConfigService';
+import { StateService, TestGenerationHistory } from '../services/StateService';
+import { ProjectSetupService } from '../services/ProjectSetupService';
+import { 
+    JestNotFoundError, 
+    TestGenerationError, 
+    RateLimitError,
+    FileValidationError
+} from '../errors/CustomErrors';
 
 /**
  * TestAgent - Core agentic workflow for automated SPFx test generation
  * 
  * This agent implements a self-healing loop:
- * 1. Generates a test file using LLM (GPT-4 via Copilot)
+ * 1. Generates a test file using LLM (GPT-4 via Copilot or other providers)
  * 2. Executes the test using Jest
  * 3. If test fails, parses the error and asks LLM to fix it
- * 4. Repeats up to 3 times until test passes
+ * 4. Repeats up to N times until test passes (configurable)
  */
 export class TestAgent {
     private testRunner: TestRunner;
-    private maxAttempts = 3;
+    private llmProvider: ILLMProvider;
+    private logger: Logger;
+    private stateService?: StateService;
+    private setupService: ProjectSetupService;
 
-    constructor() {
+    constructor(llmProvider?: ILLMProvider, stateService?: StateService) {
         this.testRunner = new TestRunner();
+        this.logger = Logger.getInstance();
+        this.setupService = new ProjectSetupService();
+        
+        // Use provided LLM provider or create default Copilot provider
+        if (llmProvider) {
+            this.llmProvider = llmProvider;
+        } else {
+            const config = ConfigService.getConfig();
+            this.llmProvider = new CopilotProvider(config.llmVendor, config.llmFamily);
+        }
+
+        this.stateService = stateService;
+        
+        this.logger.info(`TestAgent initialized with provider: ${this.llmProvider.getProviderName()}`);
     }
 
     /**
@@ -34,273 +63,239 @@ export class TestAgent {
         workspaceRoot: string,
         stream: vscode.ChatResponseStream
     ): Promise<string> {
+        const config = ConfigService.getConfig();
+        const startTime = Date.now();
+        const errorPatterns: string[] = [];
+
+        // Validate source file path
+        this.validateSourceFile(sourceFilePath, workspaceRoot);
+
+        // NEW: Check project setup before generating tests
+        stream.progress('Checking Jest environment...');
+        const setupStatus = await this.setupService.checkProjectSetup(workspaceRoot);
+        
+        if (!setupStatus.hasPackageJson) {
+            throw new FileValidationError('No package.json found in project root', workspaceRoot);
+        }
+
+        // If Jest is not installed or dependencies are missing, offer to setup
+        if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
+            this.logger.warn('Jest environment not ready', {
+                hasJest: setupStatus.hasJest,
+                missingCount: setupStatus.missingDependencies.length
+            });
+
+            const setupChoice = await vscode.window.showWarningMessage(
+                `Jest testing environment is not ready. Missing ${setupStatus.missingDependencies.length} dependencies.`,
+                'Setup Now', 'Show Details', 'Continue Anyway'
+            );
+
+            if (setupChoice === 'Setup Now') {
+                stream.progress('Setting up Jest environment...');
+                const setupSuccess = await this.setupService.setupProject(workspaceRoot, { autoInstall: true });
+                
+                if (!setupSuccess) {
+                    throw new TestGenerationError('Failed to setup Jest environment', 0, 1);
+                }
+                
+                stream.markdown('✅ Jest environment setup complete!\n\n');
+            } else if (setupChoice === 'Show Details') {
+                await this.setupService.showSetupStatus(workspaceRoot);
+                throw new TestGenerationError('Setup cancelled by user', 0, 1);
+            } else if (setupChoice !== 'Continue Anyway') {
+                throw new TestGenerationError('Setup required but cancelled by user', 0, 1);
+            }
+        }
+
         // Verify Jest is available
-        const jestAvailable = await this.testRunner.isJestAvailable(workspaceRoot);
+        const jestAvailable = await this.testRunner.isJestAvailable(workspaceRoot, config.jestCommand);
         if (!jestAvailable) {
-            throw new Error('Jest is not installed in this project. Please run: npm install --save-dev jest @types/jest');
+            throw new JestNotFoundError(workspaceRoot);
         }
 
         // Read the source file
         const sourceCode = fs.readFileSync(sourceFilePath, 'utf-8');
         const sourceFileName = path.basename(sourceFilePath);
         
+        this.logger.info('Starting test generation', {
+            sourceFile: sourceFileName,
+            workspace: workspaceRoot
+        });
         stream.progress('Reading source file...');
 
         // Determine test file path
-        const testFilePath = this.getTestFilePath(sourceFilePath);
+        const testFilePath = this.getTestFilePath(sourceFilePath, config.testFilePattern);
         
+        this.logger.info(`Test file will be created at: ${testFilePath}`);
         stream.progress('Generating initial test...');
 
         // Attempt 1: Generate initial test
-        let testCode = await this.generateTest(sourceCode, sourceFileName, null, 1);
-        fs.writeFileSync(testFilePath, testCode, 'utf-8');
+        let result = await this.llmProvider.generateTest({
+            sourceCode,
+            fileName: sourceFileName,
+            attempt: 1,
+            maxAttempts: config.maxHealingAttempts
+        });
+
+        fs.writeFileSync(testFilePath, result.code, 'utf-8');
+        this.logger.info('Initial test file generated', { model: result.model });
 
         stream.markdown(`✅ Generated test file: \`${path.relative(workspaceRoot, testFilePath)}\`\n\n`);
         stream.progress('Running test...');
 
         // Run the test
-        let result = await this.testRunner.runTest(testFilePath, workspaceRoot);
+        let testResult = await this.testRunner.runTest(testFilePath, workspaceRoot, config.jestCommand);
 
         // Self-healing loop
         let attempt = 1;
         let rateLimitRetries = 0;
-        const maxRateLimitRetries = 5;
         
-        while (!result.success && attempt < this.maxAttempts) {
+        while (!testResult.success && attempt < config.maxHealingAttempts) {
             attempt++;
             
             stream.markdown(`⚠️ Test failed on attempt ${attempt - 1}. Analyzing errors...\n\n`);
             
             // Parse and clean the error output
-            const cleanedError = JestLogParser.cleanJestOutput(result.output);
-            const summary = JestLogParser.extractTestSummary(result.output);
+            const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
+            errorPatterns.push(cleanedError.substring(0, 200)); // Store first 200 chars
+            const summary = JestLogParser.extractTestSummary(testResult.output);
             
             stream.markdown(`**Error Summary:** ${summary.failed} failed, ${summary.passed} passed\n\n`);
-            stream.progress(`Healing test (attempt ${attempt}/${this.maxAttempts})...`);
+            stream.progress(`Healing test (attempt ${attempt}/${config.maxHealingAttempts})...`);
 
-            // Wait briefly to avoid rate limits
-            await this.sleep(1000 * attempt); // Exponential backoff: 1s, 2s, 3s
+            // Wait briefly to avoid rate limits (exponential backoff)
+            await this.sleep(config.initialBackoffMs * attempt);
 
             try {
                 // Ask LLM to fix the test
-                testCode = await this.generateTest(sourceCode, sourceFileName, cleanedError, attempt);
-                fs.writeFileSync(testFilePath, testCode, 'utf-8');
+                result = await this.llmProvider.fixTest({
+                    sourceCode,
+                    fileName: sourceFileName,
+                    errorContext: cleanedError,
+                    attempt,
+                    maxAttempts: config.maxHealingAttempts
+                });
+
+                fs.writeFileSync(testFilePath, result.code, 'utf-8');
+                this.logger.info(`Test file updated (attempt ${attempt})`, { model: result.model });
 
                 stream.markdown(`🔄 Updated test file (attempt ${attempt})\n\n`);
                 stream.progress('Running test again...');
 
                 // Run the test again
-                result = await this.testRunner.runTest(testFilePath, workspaceRoot);
+                testResult = await this.testRunner.runTest(testFilePath, workspaceRoot, config.jestCommand);
                 rateLimitRetries = 0; // Reset rate limit counter on success
             } catch (error) {
-                if (this.isRateLimitError(error)) {
+                if (error instanceof RateLimitError) {
                     rateLimitRetries++;
-                    if (rateLimitRetries >= maxRateLimitRetries) {
-                        throw new Error('Rate limit exceeded. Please try again later.');
+                    if (rateLimitRetries >= config.maxRateLimitRetries) {
+                        this.logger.error('Max rate limit retries exceeded');
+                        throw error;
                     }
-                    stream.markdown(`⏸️ Rate limit encountered (retry ${rateLimitRetries}/${maxRateLimitRetries}). Waiting...\n\n`);
+                    stream.markdown(`⏸️ Rate limit encountered (retry ${rateLimitRetries}/${config.maxRateLimitRetries}). Waiting...\n\n`);
                     await this.sleep(5000 * rateLimitRetries); // Exponential backoff for rate limits
                     attempt--; // Don't count this as a real attempt
                     continue;
                 }
+                this.logger.error('Error during test healing', error);
                 throw error;
             }
         }
 
-        if (result.success) {
-            stream.markdown(`✅ **Test passed successfully!**\n\n`);
-            const summary = JestLogParser.extractTestSummary(result.output);
+        // Save to history
+        if (this.stateService) {
+            const history: TestGenerationHistory = {
+                sourceFile: sourceFilePath,
+                testFile: testFilePath,
+                timestamp: new Date(),
+                attempts: attempt,
+                success: testResult.success,
+                errorPatterns,
+                model: result.model || 'unknown'
+            };
+            await this.stateService.addTestGeneration(history);
+            this.logger.debug('Test generation saved to history');
+        }
+
+        // Final results
+        const duration = Date.now() - startTime;
+        if (testResult.success) {
+            stream.markdown(`✅ **Test passed successfully!** (${(duration / 1000).toFixed(1)}s)\n\n`);
+            const summary = JestLogParser.extractTestSummary(testResult.output);
             stream.markdown(`**Final Results:** ${summary.passed} passed, ${summary.total} total\n\n`);
+            this.logger.info('Test generation succeeded', { attempts: attempt, duration });
         } else {
-            stream.markdown(`❌ **Test still failing after ${this.maxAttempts} attempts.**\n\n`);
+            stream.markdown(`❌ **Test still failing after ${config.maxHealingAttempts} attempts.** (${(duration / 1000).toFixed(1)}s)\n\n`);
             stream.markdown('Consider reviewing the generated test manually.\n\n');
-            const cleanedError = JestLogParser.cleanJestOutput(result.output);
+            const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
             stream.markdown('```\n' + cleanedError + '\n```\n\n');
+            this.logger.warn('Test generation failed', { attempts: attempt, duration });
+            
+            throw new TestGenerationError(
+                'Test still failing after maximum attempts',
+                attempt,
+                config.maxHealingAttempts,
+                testResult.output
+            );
         }
 
         return testFilePath;
     }
 
     /**
-     * Generates or fixes a test using the LLM
-     * 
-     * @param sourceCode - The source code to test
-     * @param fileName - Name of the source file
-     * @param errorContext - Error from previous attempt (null for first attempt)
-     * @param attempt - Current attempt number
-     * @returns Generated test code
+     * Validate source file path
      */
-    private async generateTest(
-        sourceCode: string,
-        fileName: string,
-        errorContext: string | null,
-        attempt: number
-    ): Promise<string> {
-        // Select the GPT-4 model via Copilot
-        // We specifically use vendor: 'copilot' and family: 'gpt-4' to ensure
-        // we get the most capable model for code generation
-        const models = await vscode.lm.selectChatModels({
-            vendor: 'copilot',
-            family: 'gpt-4'
-        });
+    private validateSourceFile(sourceFilePath: string, workspaceRoot: string): void {
+        const normalizedPath = path.normalize(sourceFilePath);
+        const normalizedWorkspace = path.normalize(workspaceRoot);
 
-        if (models.length === 0) {
-            throw new Error('No GPT-4 model available. Ensure GitHub Copilot is installed and activated.');
+        // Check if file is within workspace
+        if (!normalizedPath.startsWith(normalizedWorkspace)) {
+            throw new FileValidationError(
+                'Source file must be within workspace',
+                sourceFilePath
+            );
         }
 
-        const model = models[0];
-
-        // Build the system prompt with SPFx-specific guidance
-        const systemPrompt = this.buildSystemPrompt();
-
-        // Build the user prompt
-        const userPrompt = errorContext 
-            ? this.buildFixPrompt(sourceCode, fileName, errorContext, attempt)
-            : this.buildInitialPrompt(sourceCode, fileName);
-
-        // Create messages for the chat
-        const messages = [
-            vscode.LanguageModelChatMessage.User(systemPrompt),
-            vscode.LanguageModelChatMessage.User(userPrompt)
-        ];
-
-        // Send request to the model
-        const response = await model.sendRequest(messages, {}, new vscode.CancellationTokenSource().token);
-
-        // Collect the streamed response
-        let testCode = '';
-        for await (const chunk of response.text) {
-            testCode += chunk;
+        // Check if file exists
+        if (!fs.existsSync(normalizedPath)) {
+            throw new FileValidationError(
+                'Source file does not exist',
+                sourceFilePath
+            );
         }
 
-        // Extract code from markdown if present
-        testCode = this.extractCodeFromMarkdown(testCode);
-
-        return testCode;
-    }
-
-    /**
-     * Builds the system prompt with SPFx-specific instructions
-     */
-    private buildSystemPrompt(): string {
-        return `You are an expert in SharePoint Framework (SPFx) development and testing.
-
-CRITICAL RULES:
-1. Use React Testing Library (@testing-library/react) for React 16+ components
-2. For SPFx-specific mocks, use the following patterns:
-   - Mock @microsoft/sp-page-context: jest.mock('@microsoft/sp-page-context')
-   - Mock @microsoft/sp-http: jest.mock('@microsoft/sp-http')
-   - Mock @microsoft/sp-core-library: jest.mock('@microsoft/sp-core-library')
-3. Always include proper type definitions with TypeScript
-4. Use jest.fn() for function mocks
-5. Use describe/it blocks for test structure
-6. Import statements must be at the top
-7. Mock external dependencies before imports
-8. Return ONLY the test code, no explanations or markdown unless wrapping code blocks
-
-RESPONSE FORMAT:
-- If you include markdown code blocks, use \`\`\`typescript or \`\`\`tsx
-- Ensure the code is complete and can be written directly to a .test.tsx file`;
-    }
-
-    /**
-     * Builds the initial test generation prompt
-     */
-    private buildInitialPrompt(sourceCode: string, fileName: string): string {
-        return `Generate comprehensive Jest unit tests for this SPFx component.
-
-**File:** ${fileName}
-
-**Source Code:**
-\`\`\`typescript
-${sourceCode}
-\`\`\`
-
-Generate a complete test file with:
-1. All necessary imports and mocks
-2. Tests for component rendering
-3. Tests for user interactions (if applicable)
-4. Tests for props variations
-5. Tests for error states (if applicable)
-
-Return the complete test file code.`;
-    }
-
-    /**
-     * Builds the fix prompt when test fails
-     */
-    private buildFixPrompt(
-        sourceCode: string,
-        fileName: string,
-        errorContext: string,
-        attempt: number
-    ): string {
-        return `The test you generated is failing. Please fix it.
-
-**Attempt:** ${attempt}
-
-**Source File:** ${fileName}
-
-**Test Error Output:**
-\`\`\`
-${errorContext}
-\`\`\`
-
-**Original Source Code:**
-\`\`\`typescript
-${sourceCode}
-\`\`\`
-
-Analyze the error and generate a CORRECTED version of the test file that will pass.
-Focus on:
-1. Fixing import errors
-2. Correcting mock implementations
-3. Fixing assertion logic
-4. Handling async operations properly
-
-Return the complete FIXED test file code.`;
-    }
-
-    /**
-     * Extracts TypeScript/TSX code from markdown code blocks
-     */
-    private extractCodeFromMarkdown(text: string): string {
-        // Look for code blocks with typescript, tsx, ts, or javascript
-        // Make pattern flexible to handle variations in whitespace
-        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\s*([\s\S]*?)\s*```/;
-        const match = text.match(codeBlockRegex);
-        
-        if (match) {
-            return match[1].trim();
-        }
-
-        // If no code block found, return as-is (LLM might have returned raw code)
-        return text.trim();
+        this.logger.debug('Source file validated', { sourceFilePath });
     }
 
     /**
      * Determines the test file path based on source file path
-     * Supports both .test.tsx and .spec.tsx patterns
+     * Supports customizable patterns via configuration
      */
-    private getTestFilePath(sourceFilePath: string): string {
+    private getTestFilePath(sourceFilePath: string, pattern: string): string {
         const dir = path.dirname(sourceFilePath);
         const ext = path.extname(sourceFilePath);
         const baseName = path.basename(sourceFilePath, ext);
         
-        // Use .test.tsx for React components, .test.ts for plain TypeScript
-        const testExt = ext === '.tsx' ? '.test.tsx' : '.test.ts';
+        // Parse pattern: ${fileName}.test.${ext}
+        // Default pattern creates MyComponent.test.tsx from MyComponent.tsx
+        let testFileName = pattern
+            .replace('${fileName}', baseName)
+            .replace('${ext}', ext.substring(1)); // Remove the dot
         
-        return path.join(dir, `${baseName}${testExt}`);
-    }
-
-    /**
-     * Checks if an error is a rate limit error
-     */
-    private isRateLimitError(error: unknown): boolean {
-        const message = (error as Error)?.message || '';
-        return message.includes('rate limit') || 
-               message.includes('429') || 
-               message.includes('Too Many Requests');
+        // Ensure proper extension
+        if (!testFileName.endsWith(ext)) {
+            testFileName += ext;
+        }
+        
+        const testFilePath = path.join(dir, testFileName);
+        this.logger.debug('Test file path determined', { 
+            sourceFile: sourceFilePath, 
+            testFile: testFilePath,
+            pattern
+        });
+        
+        return testFilePath;
     }
 
     /**

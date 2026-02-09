@@ -8,3 +8,15 @@ src/**
 tsconfig.json
 webpack.config.js
 node_modules/**
+.eslintrc.js
+*.vsix
+.github_summary.md
+ARCHITECTURE.md
+IMPLEMENTATION.md
+IMPLEMENTATION_SUMMARY.md
+IMPROVEMENTS.md
+INSTALLATION.md
+QUICKSTART.md
+RELEASE_*.md
+SETUP_FEATURE.md
+USAGE.md

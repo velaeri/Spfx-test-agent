@@ -1,54 +1,64 @@
 # SPFX Test Agent - Agentic Workflow Extension
 
-A Visual Studio Code extension that implements an **autonomous agentic workflow** for automated unit test generation in SharePoint Framework (SPFx) projects. This is not a simple chat assistant—it's a self-healing agent that generates tests, runs them, and automatically fixes errors.
+Extensión de Visual Studio Code que implementa un **workflow agéntico autónomo** para generación automática de tests unitarios en proyectos SharePoint Framework (SPFx). No es un simple asistente de chat—es un agente auto-reparable que genera tests, los ejecuta y corrige errores automáticamente.
 
-## Features
+## ✨ Novedades en v0.3.0
 
-- **🤖 Autonomous Test Generation**: Automatically creates comprehensive Jest unit tests for SPFx components
-- **🔄 Self-Healing Loop**: Runs tests, analyzes failures, and iteratively fixes them (up to 3 attempts)
-- **🧠 GPT-4 Powered**: Uses GitHub Copilot's GPT-4 model for intelligent code generation
-- **🎯 SPFx-Optimized**: Built-in knowledge of SharePoint Framework patterns and best practices
-- **🧹 Smart Error Parsing**: Cleans Jest output to reduce noise and token usage
-- **⚡ Real-time Progress**: Watch the agent work through the chat interface
+### 🌍 Interfaz en Castellano
+- Todos los mensajes ahora en español
+- Errores, advertencias y consejos localizados
+- Mejor experiencia para usuarios hispanohablantes
 
-## Architecture
+### 🎯 Modelo Flexible
+- **Usa tu modelo seleccionado**: Ya no fuerza GPT-4
+- Compatible con cualquier modelo disponible en Copilot
+- Configuración automática del modelo del usuario
 
-The extension implements an agentic workflow with three main components:
+### 📦 Versión Anterior (v0.2.0)
+- Auto-instalación de dependencias Jest
+- Configuración automática de proyecto
+- Generación por lotes de tests
 
-### 1. TestAgent (Core Logic)
-- Orchestrates the test generation and healing loop
-- Interfaces with GPT-4 via `vscode.lm.selectChatModels`
-- Implements exponential backoff for rate limiting
-- Manages up to 3 self-healing attempts
+## Características
 
-### 2. TestRunner (Execution)
-- Wraps `child_process.exec` to run Jest tests
-- Captures test output for analysis
-- Validates Jest availability in the project
+### Capacidades Principales
+- **🤖 Generación Autónoma**: Crea tests Jest completos para componentes SPFx automáticamente
+- **🔄 Auto-Reparación**: Ejecuta tests, analiza fallos y los corrige iterativamente (hasta 3 intentos)
+- **🧠 Powered by AI**: Usa GitHub Copilot para generación inteligente de código
+- **🎯 Optimizado para SPFx**: Conocimiento built-in de patrones SharePoint Framework
 
-### 3. JestLogParser (Intelligence)
-- Removes ANSI color codes from output
-- Filters out noise from node_modules
-- Extracts relevant error messages and stack traces
-- Reduces token consumption when communicating with LLM
+### Características v0.3.0
+- **🌍 Interfaz en Castellano**: Mensajes, errores y ayudas en español
+- **🎯 Modelo Dinámico**: Usa el modelo que tengas seleccionado en Copilot
+- **📦 Auto-Setup**: Detecta dependencias faltantes y las instala automáticamente
+- **🔧 Configuración Inteligente**: Crea jest.config.js óptimo para SPFx
+- **📋 Comandos Manuales**: Setup de Jest via Command Palette
+- **🔍 Generación Masiva**: Genera tests para todo el workspace con `@spfx-tester generate-all`
 
-## Prerequisites
+### Características Técnicas
+- **🧹 Parsing Inteligente**: Limpia output de Jest reduciendo ruido
+- **⚡ Progreso en Tiempo Real**: Observa el agente trabajar via chat
+- **🛡️ Seguridad**: Usa spawn en lugar de exec para prevenir inyección
+- **📊 Gestión de Estado**: Rastrea historial de generación
+- **🎨 Configurable**: 11+ settings para personalizar comportamiento
 
-- **VS Code**: Version 1.85.0 or higher
-- **GitHub Copilot**: Must be installed and activated
-- **Node.js**: v18 or higher
-- **Jest**: Must be installed in your SPFx project
+## Requisitos
 
-## Installation
+- **VS Code**: Version 1.85.0 o superior
+- **GitHub Copilot**: Debe estar instalado y activado
+- **Node.js**: v18 o superior
+- **Jest**: ~~Debe estar instalado~~ → **¡Ahora se auto-instala!** 🎉
 
-### From Source
+## Instalación
 
-1. Clone this repository
-2. Install dependencies:
+### Desde Código Fuente
+
+1. Clona este repositorio
+2. Instala dependencias:
    ```bash
    npm install
    ```
-3. Compile the extension:
+3. Compila la extensión:
    ```bash
    npm run compile
    ```

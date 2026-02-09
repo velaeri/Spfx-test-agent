@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.3] - 2026-02-09
+
+### 🔧 Correcciones Críticas de UX
+
+#### Eliminados Diálogos Modales Bloqueantes
+- ❌ **Removido**: `vscode.window.showWarningMessage` que bloqueaba el flujo del chat
+- ✅ **Ahora**: Todo el flujo es automático dentro del chat
+- 🚀 **Resultado**: El usuario solo interactúa con el chat, sin modales inesperados
+
+#### Detección Inteligente de Proyectos
+- 🔍 **Busca automáticamente**: Proyectos Node.js (package.json) en todo el workspace
+- 📁 **Múltiples proyectos**: Lista todos los encontrados y muestra cuál tiene Jest
+- 🎯 **Selección automática**: Usa el primer proyecto encontrado
+- ⚠️ **Error claro**: Si no encuentra package.json, sugiere abrir la carpeta correcta
+
+#### Setup Automático Sin Confirmación
+- ✨ **`/setup`**: Instala automáticamente sin pedir confirmación
+- ✨ **`/generate` y `/generate-all`**: Ejecutan setup automáticamente si es necesario
+- 📊 **Progreso visible**: Mensajes claros durante la instalación
+- 💡 **Sin interrupciones**: El usuario solo ve el progreso en el chat
+
+### 🐛 Bugs Corregidos
+- Error "No se encontró package.json" cuando el workspace era la extensión misma
+- Diálogos modales que aparecían fuera del contexto del chat
+- Flujo confuso con múltiples ventanas de confirmación
+
 ## [0.3.2] - 2026-02-09
 
 ### ✨ Nuevo Comando: `/setup`

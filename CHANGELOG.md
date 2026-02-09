@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.3.2] - 2026-02-09
+
+### ✨ Nuevo Comando: `/setup`
+
+#### Comando Dedicado de Setup
+- 🎯 **`@spfx-tester /setup`**: Nuevo comando para configurar el entorno Jest manualmente
+- 📊 **Estado detallado**: Muestra qué está instalado y qué falta
+- 🔧 **Configuración completa**: Instala dependencias y crea archivos de configuración
+- ✅ **Feedback claro**: Indica si el entorno ya está configurado
+
+#### Integración Automática
+- 🚀 **`/generate` y `/generate-all` usan `/setup` automáticamente**: Si detectan entorno incompleto
+- 💡 **Sugerencia visible**: Los comandos sugieren usar `/setup` manualmente
+- 🔄 **Helper reutilizable**: `ensureJestEnvironment()` centraliza la lógica
+
+#### Mejoras de UX
+- 📋 **Lista todas las dependencias** que se van a instalar
+- ⏱️ **Progreso visible** durante instalación
+- 🎨 **Diálogo simplificado**: Solo "Sí, Instalar Ahora" o "Cancelar"
+
+### 📝 Comandos Disponibles
+```
+@spfx-tester /setup         - Configura el entorno Jest
+@spfx-tester /generate      - Genera test para archivo actual
+@spfx-tester /generate-all  - Genera tests para todo el workspace
+```
+
 ## [0.3.1] - 2026-02-09
 
 ### 🔧 Setup Automático Mejorado

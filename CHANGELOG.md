@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.1] - 2026-02-09
+
+### 🔧 Setup Automático Mejorado
+
+#### Verificación Proactiva
+- ✨ **Verifica el entorno Jest al inicio**: Detecta dependencias faltantes antes de generar tests
+- 🎯 **Verificación única en /generate-all**: Se hace una vez al principio, no por cada archivo
+- 📋 **Lista de dependencias**: Muestra qué se va a instalar antes de hacerlo
+
+#### Diálogo Mejorado
+- 💬 **Modal más claro**: Opciones explícitas ("Sí, Instalar Ahora", "Mostrar Detalles", "Cancelar")
+- 📊 **Información detallada**: Muestra estado de Jest y cantidad de dependencias faltantes
+- ⏱️ **Progreso visible**: Mensajes durante la instalación
+
+#### Correcciones
+- 🐛 Diálogo que se perdía en generación de múltiples archivos
+- 🐛 Manejo correcto cuando el usuario cierra el diálogo sin seleccionar
+- 🐛 Eliminada verificación duplicada en TestAgent
+
 ## [0.3.0] - 2026-02-09
 
 ### 🌍 Internacionalización y UX

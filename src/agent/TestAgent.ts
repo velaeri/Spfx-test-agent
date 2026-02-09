@@ -70,43 +70,6 @@ export class TestAgent {
         // Validate source file path
         this.validateSourceFile(sourceFilePath, workspaceRoot);
 
-        // NEW: Check project setup before generating tests
-        stream.progress('Checking Jest environment...');
-        const setupStatus = await this.setupService.checkProjectSetup(workspaceRoot);
-        
-        if (!setupStatus.hasPackageJson) {
-            throw new FileValidationError('No package.json found in project root', workspaceRoot);
-        }
-
-        // If Jest is not installed or dependencies are missing, offer to setup
-        if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
-            this.logger.warn('Jest environment not ready', {
-                hasJest: setupStatus.hasJest,
-                missingCount: setupStatus.missingDependencies.length
-            });
-
-            const setupChoice = await vscode.window.showWarningMessage(
-                `Jest testing environment is not ready. Missing ${setupStatus.missingDependencies.length} dependencies.`,
-                'Setup Now', 'Show Details', 'Continue Anyway'
-            );
-
-            if (setupChoice === 'Setup Now') {
-                stream.progress('Setting up Jest environment...');
-                const setupSuccess = await this.setupService.setupProject(workspaceRoot, { autoInstall: true });
-                
-                if (!setupSuccess) {
-                    throw new TestGenerationError('Failed to setup Jest environment', 0, 1);
-                }
-                
-                stream.markdown('✅ Jest environment setup complete!\n\n');
-            } else if (setupChoice === 'Show Details') {
-                await this.setupService.showSetupStatus(workspaceRoot);
-                throw new TestGenerationError('Setup cancelled by user', 0, 1);
-            } else if (setupChoice !== 'Continue Anyway') {
-                throw new TestGenerationError('Setup required but cancelled by user', 0, 1);
-            }
-        }
-
         // Verify Jest is available
         const jestAvailable = await this.testRunner.isJestAvailable(workspaceRoot, config.jestCommand);
         if (!jestAvailable) {

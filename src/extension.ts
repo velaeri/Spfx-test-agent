@@ -184,6 +184,63 @@ async function handleGenerateSingleRequest(
     const workspaceRoot = workspaceFolder.uri.fsPath;
     logger.info('Workspace identified', { workspaceRoot });
 
+    // ✨ NEW: Check Jest environment before generating test
+    stream.progress('Verificando entorno Jest...');
+    const setupService = new ProjectSetupService();
+    const setupStatus = await setupService.checkProjectSetup(workspaceRoot);
+
+    if (!setupStatus.hasPackageJson) {
+        stream.markdown(`❌ **No se encontró package.json en la raíz del proyecto**\n\n`);
+        return { errorDetails: { message: 'No package.json found' } };
+    }
+
+    if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
+        stream.markdown(`\n⚠️ **Entorno Jest no está listo**\n\n`);
+        stream.markdown(`- Jest instalado: ${setupStatus.hasJest ? '✅' : '❌'}\n`);
+        stream.markdown(`- Dependencias faltantes: **${setupStatus.missingDependencies.length}**\n\n`);
+
+        if (setupStatus.missingDependencies.length > 0) {
+            stream.markdown(`**Dependencias que se instalarán:**\n`);
+            setupStatus.missingDependencies.slice(0, 8).forEach(dep => {
+                stream.markdown(`  - \`${dep}\`\n`);
+            });
+            stream.markdown(`\n`);
+        }
+
+        const setupChoice = await vscode.window.showWarningMessage(
+            `Se necesita configurar el entorno Jest (${setupStatus.missingDependencies.length} dependencias). ¿Instalar ahora?`,
+            { modal: true },
+            'Sí, Instalar Ahora',
+            'Mostrar Detalles',
+            'Cancelar'
+        );
+
+        if (setupChoice === 'Sí, Instalar Ahora') {
+            stream.markdown(`🔧 **Instalando dependencias Jest...**\n\n`);
+            stream.markdown(`Esto puede tomar unos minutos. Por favor espera...\n\n`);
+            stream.progress('Instalando dependencias...');
+            
+            const setupSuccess = await setupService.setupProject(workspaceRoot, { autoInstall: true });
+            
+            if (!setupSuccess) {
+                stream.markdown(`❌ **Error al configurar el entorno Jest**\n\n`);
+                stream.markdown(`Por favor, instala las dependencias manualmente.\n`);
+                return { errorDetails: { message: 'Setup failed' } };
+            }
+            
+            stream.markdown(`✅ **¡Entorno Jest configurado correctamente!**\n\n`);
+        } else if (setupChoice === 'Mostrar Detalles') {
+            await setupService.showSetupStatus(workspaceRoot);
+            stream.markdown(`\n❌ Configuración cancelada.\n`);
+            return { metadata: { command: 'generate' } };
+        } else {
+            stream.markdown(`\n❌ Configuración cancelada por el usuario.\n`);
+            return { metadata: { command: 'generate' } };
+        }
+    } else {
+        stream.markdown(`✅ Entorno Jest listo\n\n`);
+    }
+
     // Show what we're doing
     stream.markdown(`## 🚀 Generando Tests para \`${fileName}\`\n\n`);
     stream.markdown(`Usando workflow agentico con capacidades de auto-reparación...\n\n`);
@@ -256,13 +313,73 @@ async function handleGenerateAllRequest(
     stream.markdown(`Encontrados **${allFiles.length}** archivos fuente\n`);
     stream.markdown(`**${filesWithoutTests.length}** archivos necesitan tests\n\n`);
 
-    // Ask for confirmation
-    stream.markdown(`⚠️ Esto generará tests para ${filesWithoutTests.length} archivos. Puede tomar varios minutos.\n\n`);
-
     // Group files by project (for better Jest execution)
     const projectMap = FileScanner.groupFilesByProject(filesWithoutTests);
 
     stream.markdown(`📁 Encontrados **${projectMap.size}** proyecto(s)\n\n`);
+
+    // ✨ NEW: Check Jest environment ONCE before processing all files
+    stream.progress('Verificando entorno Jest...');
+    const firstProjectRoot = projectMap.keys().next().value;
+    
+    if (!firstProjectRoot) {
+        throw new WorkspaceNotFoundError();
+    }
+    
+    const setupService = new ProjectSetupService();
+    const setupStatus = await setupService.checkProjectSetup(firstProjectRoot);
+
+    if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
+        stream.markdown(`\n⚠️ **Entorno Jest no está listo**\n\n`);
+        stream.markdown(`- Jest instalado: ${setupStatus.hasJest ? '✅' : '❌'}\n`);
+        stream.markdown(`- Dependencias faltantes: **${setupStatus.missingDependencies.length}**\n\n`);
+
+        if (setupStatus.missingDependencies.length > 0) {
+            stream.markdown(`**Dependencias que se instalarán:**\n`);
+            setupStatus.missingDependencies.slice(0, 5).forEach(dep => {
+                stream.markdown(`  - \`${dep}\`\n`);
+            });
+            if (setupStatus.missingDependencies.length > 5) {
+                stream.markdown(`  - ... y ${setupStatus.missingDependencies.length - 5} más\n`);
+            }
+            stream.markdown(`\n`);
+        }
+
+        const setupChoice = await vscode.window.showWarningMessage(
+            `Se necesita configurar el entorno Jest (${setupStatus.missingDependencies.length} dependencias). ¿Instalar ahora?`,
+            { modal: true },
+            'Sí, Instalar Ahora',
+            'Mostrar Detalles',
+            'Cancelar'
+        );
+
+        if (setupChoice === 'Sí, Instalar Ahora') {
+            stream.markdown(`🔧 **Instalando dependencias Jest...**\n\n`);
+            stream.progress('Instalando dependencias (esto puede tomar unos minutos)...');
+            
+            const setupSuccess = await setupService.setupProject(firstProjectRoot, { autoInstall: true });
+            
+            if (!setupSuccess) {
+                stream.markdown(`❌ **Error al configurar el entorno Jest**\n\n`);
+                stream.markdown(`Por favor, instala las dependencias manualmente o revisa el Output Channel.\n`);
+                return { errorDetails: { message: 'Setup failed' } };
+            }
+            
+            stream.markdown(`✅ **¡Entorno Jest configurado correctamente!**\n\n`);
+        } else if (setupChoice === 'Mostrar Detalles') {
+            await setupService.showSetupStatus(firstProjectRoot);
+            stream.markdown(`\n❌ Configuración cancelada. Usa el comando "SPFX Test Agent: Setup Jest Environment" para configurar manualmente.\n`);
+            return { metadata: { command: 'generate-all' } };
+        } else {
+            stream.markdown(`\n❌ Configuración cancelada por el usuario.\n`);
+            return { metadata: { command: 'generate-all' } };
+        }
+    } else {
+        stream.markdown(`✅ Entorno Jest listo\n\n`);
+    }
+
+    // Ask for confirmation to proceed
+    stream.markdown(`⚠️ Esto generará tests para ${filesWithoutTests.length} archivos. Puede tomar varios minutos.\n\n`);
 
     let successCount = 0;
     let failCount = 0;

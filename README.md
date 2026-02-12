@@ -73,7 +73,7 @@ Extensión de Visual Studio Code que implementa un **workflow agéntico autónom
 3. Type `@spfx-tester generate`
 4. Watch the agent work:
    - 📖 Reads your source code
-   - 🧠 Generates initial test using GPT-4
+   - 🧠 Generates initial test using your configured Copilot model
    - ✅ Runs the test with Jest
    - 🔄 If failed, analyzes errors and regenerates (up to 3 times)
    - 📝 Opens the final test file for you
@@ -108,7 +108,7 @@ Agent: 🚀 Generating Tests for MyWebPart.tsx
 ```
 1. Read Source Code
    ↓
-2. Generate Test (GPT-4)
+2. Generate Test (AI)
    ↓
 3. Save Test File
    ↓
@@ -181,15 +181,15 @@ npm run package
 
 ### Model Selection
 
-The extension explicitly uses GPT-4 via Copilot:
-```typescript
-const models = await vscode.lm.selectChatModels({
-    vendor: 'copilot',
-    family: 'gpt-4'
-});
-```
+The extension dynamically uses the model you have selected in GitHub Copilot:
+- Respects your **Copilot Chat** model preference (GPT-4o, GPT-4, etc.)
+- Includes an automatic **fallback system** to find the best available model
+- Ensures compatibility with various Copilot subscriptions
 
-This ensures the highest quality code generation for complex test scenarios.
+```typescript
+// Conceptual logic
+const model = await selectUserPreferredModel() || await selectBestAvailableFallback();
+```
 
 ### Error Handling
 
@@ -220,7 +220,7 @@ The JestLogParser reduces token usage by:
 npm install --save-dev jest @types/jest ts-jest
 ```
 
-### "No GPT-4 model available"
+### "No suitable AI model available"
 - Ensure GitHub Copilot extension is installed
 - Verify you're signed in to GitHub Copilot
 - Check your Copilot subscription is active

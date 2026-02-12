@@ -5,10 +5,12 @@ import { TestRunner } from '../utils/TestRunner';
 import { JestLogParser } from '../utils/JestLogParser';
 import { ILLMProvider } from '../interfaces/ILLMProvider';
 import { CopilotProvider } from '../providers/CopilotProvider';
+import { AzureOpenAIProvider } from '../providers/AzureOpenAIProvider';
 import { Logger } from '../services/Logger';
 import { ConfigService } from '../services/ConfigService';
 import { StateService, TestGenerationHistory } from '../services/StateService';
 import { ProjectSetupService } from '../services/ProjectSetupService';
+import { TelemetryService } from '../services/TelemetryService';
 import { 
     JestNotFoundError, 
     TestGenerationError, 
@@ -31,18 +33,30 @@ export class TestAgent {
     private logger: Logger;
     private stateService?: StateService;
     private setupService: ProjectSetupService;
+    private telemetryService: TelemetryService;
 
     constructor(llmProvider?: ILLMProvider, stateService?: StateService) {
         this.testRunner = new TestRunner();
         this.logger = Logger.getInstance();
         this.setupService = new ProjectSetupService();
+        this.telemetryService = TelemetryService.getInstance();
         
         // Use provided LLM provider or create default Copilot provider
         if (llmProvider) {
             this.llmProvider = llmProvider;
         } else {
             const config = ConfigService.getConfig();
-            this.llmProvider = new CopilotProvider(config.llmVendor, config.llmFamily);
+            
+            // Check if Azure OpenAI is configured
+            const hasAzureConfig = config.azureOpenAI?.endpoint && 
+                                 config.azureOpenAI?.apiKey && 
+                                 config.azureOpenAI?.deploymentName;
+
+            if (hasAzureConfig) {
+                this.llmProvider = new AzureOpenAIProvider();
+            } else {
+                this.llmProvider = new CopilotProvider(config.llmVendor, config.llmFamily);
+            }
         }
 
         this.stateService = stateService;
@@ -66,6 +80,8 @@ export class TestAgent {
         const config = ConfigService.getConfig();
         const startTime = Date.now();
         const errorPatterns: string[] = [];
+
+        this.telemetryService.trackCommandExecution('generate');
 
         // Validate source file path
         this.validateSourceFile(sourceFilePath, workspaceRoot);
@@ -122,6 +138,8 @@ export class TestAgent {
             const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
             errorPatterns.push(cleanedError.substring(0, 200)); // Store first 200 chars
             const summary = JestLogParser.extractTestSummary(testResult.output);
+            
+            this.telemetryService.trackHealingAttempt(attempt, 'JestTestFailure');
             
             stream.markdown(`**Error Summary:** ${summary.failed} failed, ${summary.passed} passed\n\n`);
             stream.progress(`Healing test (attempt ${attempt}/${config.maxHealingAttempts})...`);
@@ -182,6 +200,13 @@ export class TestAgent {
 
         // Final results
         const duration = Date.now() - startTime;
+        
+        this.telemetryService.trackTestGeneration(
+            testResult.success, 
+            attempt, 
+            duration
+        );
+        
         if (testResult.success) {
             stream.markdown(`✅ **Test passed successfully!** (${(duration / 1000).toFixed(1)}s)\n\n`);
             const summary = JestLogParser.extractTestSummary(testResult.output);
@@ -193,6 +218,8 @@ export class TestAgent {
             const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
             stream.markdown('```\n' + cleanedError + '\n```\n\n');
             this.logger.warn('Test generation failed', { attempts: attempt, duration });
+            
+            this.telemetryService.trackError('TestGenerationError', 'generation');
             
             throw new TestGenerationError(
                 'Test still failing after maximum attempts',
@@ -247,7 +274,8 @@ export class TestAgent {
             .replace('${ext}', ext.substring(1)); // Remove the dot
         
         // Ensure proper extension
-        if (!testFileName.endsWith(ext)) {
+        const hasTestExtension = testFileName.match(/\.test\.(ts|tsx)$|\.spec\.(ts|tsx)$/);
+        if (!hasTestExtension) {
             testFileName += ext;
         }
         

@@ -16,8 +16,16 @@ export class CopilotProvider implements ILLMProvider {
     constructor(vendor: string = 'copilot', family?: string, timeoutMs: number = 60000) {
         this.logger = Logger.getInstance();
         this.vendor = vendor;
-        this.family = family || ''; // Empty string means "use default model"
+        // Treat empty string as undefined to avoid model selection issues
+        this.family = (family && family.trim() !== '') ? family : '';
         this.timeoutMs = timeoutMs;
+        
+        // Log the configuration for debugging
+        if (!this.family) {
+            this.logger.info('CopilotProvider initialized without family filter - will use user\'s default model');
+        } else {
+            this.logger.info(`CopilotProvider initialized with family: ${this.family}`);
+        }
     }
 
     /**
@@ -86,21 +94,61 @@ export class CopilotProvider implements ILLMProvider {
     }
 
     /**
+     * Send a generic request to the LLM (public method for other services)
+     */
+    public async ask(systemPrompt: string, userPrompt: string): Promise<LLMResult> {
+        return await this.sendRequest(systemPrompt, userPrompt);
+    }
+
+    /**
      * Send a request to the LLM
      */
     private async sendRequest(systemPrompt: string, userPrompt: string): Promise<LLMResult> {
-        // Get available models
-        let models;
+        // Get available models with intelligent fallback
+        let models: readonly vscode.LanguageModelChat[] = [];
+        
         if (this.family) {
             // Use specific model family if configured
+            this.logger.info(`Requesting models with family: ${this.family}`);
             models = await vscode.lm.selectChatModels({
                 vendor: this.vendor,
                 family: this.family
             });
-        } else {
-            // Use user's currently selected model (no family filter)
+        }
+        
+        // If no models found with specified family, or no family specified, try GPT-4o
+        if (models.length === 0) {
+            this.logger.info('Trying GPT-4o as primary model...');
             models = await vscode.lm.selectChatModels({
+                vendor: this.vendor,
+                family: 'gpt-4o'
+            });
+        }
+        
+        // If still no models, try any GPT-4 model
+        if (models.length === 0) {
+            this.logger.info('Trying any GPT-4 model...');
+            models = await vscode.lm.selectChatModels({
+                vendor: this.vendor,
+                family: 'gpt-4'
+            });
+        }
+        
+        // Last resort: get all models and filter out known problematic ones
+        if (models.length === 0) {
+            this.logger.info('Trying any available model, filtering problematic ones...');
+            const allModels = await vscode.lm.selectChatModels({
                 vendor: this.vendor
+            });
+            
+            // Filter out Claude models that don't support extension API
+            models = allModels.filter(model => {
+                const isClaudeOpus = model.id.includes('claude-opus') || model.family.includes('claude-opus');
+                if (isClaudeOpus) {
+                    this.logger.warn(`Skipping unsupported model: ${model.id} (${model.name})`);
+                    return false;
+                }
+                return true;
             });
         }
 

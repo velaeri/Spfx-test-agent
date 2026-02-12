@@ -42,4 +42,9 @@ export interface ILLMProvider {
      * Get the provider name
      */
     getProviderName(): string;
+
+    /**
+     * Detect missing dependencies based on package.json content
+     */
+    detectDependencies(packageJsonContent: any): Promise<Record<string, string>>;
 }

@@ -2,6 +2,8 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Logger } from '../services/Logger';
+import { DependencyDetectionService } from '../services/DependencyDetectionService';
+import { JestConfigurationService } from '../services/JestConfigurationService';
 import { SecurityError, TestExecutionError } from '../errors/CustomErrors';
 import { FileScanner } from './FileScanner';
 
@@ -21,9 +23,13 @@ export interface TestRunResult {
  */
 export class TestRunner {
     private logger: Logger;
+    private dependencyService: DependencyDetectionService;
+    private configService: JestConfigurationService;
 
     constructor() {
         this.logger = Logger.getInstance();
+        this.dependencyService = new DependencyDetectionService();
+        this.configService = new JestConfigurationService();
     }
 
     /**
@@ -62,7 +68,7 @@ export class TestRunner {
         });
 
         // Check if jest.config exists
-        const hasJestConfig = this.hasJestConfig(projectRoot);
+        const hasJestConfig = this.configService.hasJestConfig(projectRoot);
         this.logger.debug('Jest config check', { 
             projectRoot, 
             hasJestConfig 
@@ -146,59 +152,18 @@ export class TestRunner {
     }
 
     /**
-     * Check if project has a Jest configuration file
-     * 
-     * @param projectRoot - Project root directory
-     * @returns True if jest.config.* exists
-     */
-    private hasJestConfig(projectRoot: string): boolean {
-        const configFiles = [
-            'jest.config.js',
-            'jest.config.ts',
-            'jest.config.mjs',
-            'jest.config.cjs',
-            'jest.config.cts',
-            'jest.config.json'
-        ];
-
-        return configFiles.some(file => 
-            fs.existsSync(path.join(projectRoot, file))
-        );
-    }
-
-    /**
      * Checks if Jest is available in the project
      * 
      * @param workspaceRoot - Root directory of the workspace
-     * @param jestCommand - Command to check (e.g., 'npx jest', 'yarn jest')
+     * @param jestCommand - Command to check (e.g., 'npx jest', 'yarn jest') - ignored in favor of unified check
      * @returns Promise<boolean> indicating if Jest is installed
      */
     async isJestAvailable(
         workspaceRoot: string,
         jestCommand: string = 'npx jest'
     ): Promise<boolean> {
-        const commandParts = jestCommand.split(' ');
-        const command = commandParts[0];
-        const baseArgs = commandParts.slice(1);
-
-        this.logger.debug(`Checking Jest availability: ${command} ${baseArgs.join(' ')} --version`);
-
-        return new Promise((resolve) => {
-            const child = spawn(command, [...baseArgs, '--version'], {
-                cwd: workspaceRoot,
-                shell: true
-            });
-
-            child.on('error', () => {
-                this.logger.warn('Jest not available');
-                resolve(false);
-            });
-
-            child.on('close', (code) => {
-                const available = code === 0;
-                this.logger.debug(`Jest available: ${available}`);
-                resolve(available);
-            });
-        });
+        this.logger.debug(`Checking Jest availability in: ${workspaceRoot}`);
+        // Use unified detection logic
+        return this.dependencyService.checkJestAvailability(workspaceRoot);
     }
 }

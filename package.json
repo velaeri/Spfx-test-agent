@@ -2,7 +2,7 @@
   "name": "spfx-test-agent",
   "displayName": "SPFX Test Agent",
   "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "publisher": "velaeri",
   "repository": {
     "type": "git",
@@ -102,6 +102,21 @@
           "default": "copilot",
           "description": "LLM provider to use for code generation"
         },
+        "spfx-tester.azureOpenAI.endpoint": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI Endpoint URL"
+        },
+        "spfx-tester.azureOpenAI.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI API Key"
+        },
+        "spfx-tester.azureOpenAI.deploymentName": {
+          "type": "string",
+          "default": "",
+          "description": "Azure OpenAI Deployment Name"
+        },
         "spfx-tester.llmVendor": {
           "type": "string",
           "default": "copilot",
@@ -145,5 +160,8 @@
     "typescript": "^5.3.3",
     "webpack": "^5.89.0",
     "webpack-cli": "^5.1.4"
+  },
+  "optionalDependencies": {
+    "@azure/openai": "^1.0.0-beta.12"
   }
 }

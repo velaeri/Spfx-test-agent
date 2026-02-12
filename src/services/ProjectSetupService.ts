@@ -1,78 +1,10 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
 import { Logger } from './Logger';
-
-/**
- * Required Jest dependencies for SPFx projects
- */
-const JEST_DEPENDENCIES = {
-    // Core Jest packages
-    'jest': '^29.7.0',
-    '@types/jest': '^29.5.11',
-    'ts-jest': '^29.1.1',
-    
-    // React Testing Library (SPFx uses React)
-    '@testing-library/react': '^14.1.2',
-    '@testing-library/jest-dom': '^6.1.5',
-    '@testing-library/user-event': '^14.5.1',
-    
-    // Additional React test utilities
-    'react-test-renderer': '^17.0.1',
-    '@types/react-test-renderer': '^17.0.1',
-    
-    // Identity mock for module imports (CSS, images, etc.)
-    'identity-obj-proxy': '^3.0.0'
-};
-
-/**
- * Default Jest configuration for SPFx projects
- */
-const DEFAULT_JEST_CONFIG = {
-    preset: 'ts-jest',
-    testEnvironment: 'jsdom',
-    moduleNameMapper: {
-        '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
-        '\\.(jpg|jpeg|png|gif|svg)$': '<rootDir>/__mocks__/fileMock.js'
-    },
-    setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
-    testMatch: [
-        '**/__tests__/**/*.(test|spec).ts?(x)',
-        '**/?(*.)+(spec|test).ts?(x)'
-    ],
-    collectCoverageFrom: [
-        'src/**/*.{ts,tsx}',
-        '!src/**/*.d.ts',
-        '!src/index.ts'
-    ],
-    transform: {
-        '^.+\\.tsx?$': ['ts-jest', {
-            tsconfig: {
-                jsx: 'react',
-                esModuleInterop: true,
-                allowSyntheticDefaultImports: true
-            }
-        }]
-    },
-    moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json']
-};
-
-/**
- * Default jest.setup.js content
- */
-const JEST_SETUP_CONTENT = `// Jest setup file
-import '@testing-library/jest-dom';
-
-// Mock SharePoint framework context if needed
-global.spfxContext = {};
-`;
-
-/**
- * File mock for static assets
- */
-const FILE_MOCK_CONTENT = `module.exports = 'test-file-stub';
-`;
+import { DependencyDetectionService } from './DependencyDetectionService';
+import { PackageInstallationService } from './PackageInstallationService';
+import { JestConfigurationService } from './JestConfigurationService';
 
 export interface SetupStatus {
     hasPackageJson: boolean;
@@ -82,6 +14,7 @@ export interface SetupStatus {
     missingDependencies: string[];
     errors: string[];
     warnings: string[];
+    installCommand?: string; // npm install command to execute
 }
 
 export interface SetupOptions {
@@ -94,9 +27,15 @@ export interface SetupOptions {
  */
 export class ProjectSetupService {
     private logger: Logger;
+    private dependencyService: DependencyDetectionService;
+    private packageService: PackageInstallationService;
+    private configService: JestConfigurationService;
 
     constructor() {
         this.logger = Logger.getInstance();
+        this.dependencyService = new DependencyDetectionService();
+        this.packageService = new PackageInstallationService();
+        this.configService = new JestConfigurationService();
     }
 
     /**
@@ -131,27 +70,51 @@ export class ProjectSetupService {
             return status;
         }
 
-        // Check Jest dependencies
+        // Check Jest dependencies (use LLM-powered intelligent version detection)
         const allDeps = {
             ...packageJson.dependencies || {},
             ...packageJson.devDependencies || {}
         };
 
-        for (const [pkg, _version] of Object.entries(JEST_DEPENDENCIES)) {
+        this.logger.debug('All dependencies found in package.json', {
+            total: Object.keys(allDeps).length,
+            hasDeps: !!packageJson.dependencies,
+            hasDevDeps: !!packageJson.devDependencies
+        });
+
+        status.hasJest = await this.dependencyService.checkJestAvailability(projectRoot);
+
+        // Get LLM-recommended dependencies (intelligent detection)
+        const compatibleDeps = await this.dependencyService.getCompatibleDependencies(projectRoot);
+
+        this.logger.debug('LLM-recommended dependencies', {
+            packages: Object.keys(compatibleDeps),
+            count: Object.keys(compatibleDeps).length
+        });
+
+        // Check which dependencies are missing
+        for (const [pkg, version] of Object.entries(compatibleDeps)) {
             if (!allDeps[pkg]) {
+                this.logger.debug(`Missing dependency: ${pkg}`);
                 status.missingDependencies.push(pkg);
+            } else {
+                this.logger.debug(`Dependency found: ${pkg} = ${allDeps[pkg]}`);
             }
         }
 
-        status.hasJest = allDeps['jest'] !== undefined;
+        // Generate npm install command if there are missing dependencies
+        if (status.missingDependencies.length > 0) {
+            const packageVersions = status.missingDependencies.map(pkg => {
+                const version = compatibleDeps[pkg];
+                return `${pkg}@${version}`;
+            });
+            status.installCommand = `npm install --save-dev --legacy-peer-deps ${packageVersions.join(' ')}`;
+        } else {
+            this.logger.info('✅ All required Jest dependencies are installed');
+        }
 
         // Check jest.config.js or jest.config.ts
-        const jestConfigPaths = [
-            path.join(projectRoot, 'jest.config.js'),
-            path.join(projectRoot, 'jest.config.ts'),
-            path.join(projectRoot, 'jest.config.json')
-        ];
-        status.hasJestConfig = jestConfigPaths.some(p => fs.existsSync(p));
+        status.hasJestConfig = this.configService.hasJestConfig(projectRoot);
 
         // Check jest.setup.js
         const jestSetupPath = path.join(projectRoot, 'jest.setup.js');
@@ -169,188 +132,72 @@ export class ProjectSetupService {
     }
 
     /**
-     * Setup the project for testing (install dependencies, create config files)
+     * Setup the project for testing (create config files only, return install command)
      */
-    async setupProject(projectRoot: string, options: SetupOptions = {}): Promise<boolean> {
+    async setupProject(projectRoot: string, options: SetupOptions = {}): Promise<{ success: boolean; installCommand?: string }> {
         this.logger.info(`Setting up Jest environment in: ${projectRoot}`);
 
         const status = await this.checkProjectSetup(projectRoot);
 
         // Create progress notification
-        return await vscode.window.withProgress({
+        const result = await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: 'Setting up Jest testing environment',
             cancellable: false
         }, async (progress) => {
             try {
-                // Step 1: Install missing dependencies
-                if (status.missingDependencies.length > 0) {
-                    progress.report({ message: 'Installing Jest dependencies...', increment: 10 });
-                    
-                    if (options.autoInstall !== false) {
-                        const success = await this.installDependencies(projectRoot, status.missingDependencies);
-                        if (!success) {
-                            vscode.window.showErrorMessage('Failed to install Jest dependencies');
-                            return false;
-                        }
-                    } else {
-                        const install = await vscode.window.showInformationMessage(
-                            `Missing ${status.missingDependencies.length} Jest dependencies. Install now?`,
-                            'Yes', 'No'
-                        );
-                        if (install === 'Yes') {
-                            const success = await this.installDependencies(projectRoot, status.missingDependencies);
-                            if (!success) {
-                                return false;
-                            }
-                        } else {
-                            return false;
-                        }
-                    }
-                }
-
-                // Step 2: Create jest.config.js if missing
+                // Step 1: Create jest.config.js if missing
                 if (!status.hasJestConfig || options.force) {
                     progress.report({ message: 'Creating jest.config.js...', increment: 30 });
-                    await this.createJestConfig(projectRoot);
+                    await this.configService.createJestConfig(projectRoot);
                 }
 
-                // Step 3: Create jest.setup.js if missing
+                // Step 2: Create jest.setup.js if missing
                 if (!status.hasJestSetup || options.force) {
                     progress.report({ message: 'Creating jest.setup.js...', increment: 20 });
-                    await this.createJestSetup(projectRoot);
+                    await this.configService.createJestSetup(projectRoot);
                 }
 
-                // Step 4: Create __mocks__ directory
+                // Step 3: Create __mocks__ directory
                 progress.report({ message: 'Creating mock directories...', increment: 20 });
-                await this.createMockDirectory(projectRoot);
+                await this.configService.createMockDirectory(projectRoot);
 
-                // Step 5: Update package.json scripts
+                // Step 4: Update package.json scripts
                 progress.report({ message: 'Updating package.json scripts...', increment: 20 });
-                await this.updatePackageJsonScripts(projectRoot);
+                await this.configService.updatePackageJsonScripts(projectRoot);
+
+                // Auto install if requested
+                if (options.autoInstall && status.installCommand) {
+                    progress.report({ message: 'Installing dependencies...', increment: 10 });
+                    // Parse install command to get package list or use existing data
+                    // We can reconstruct package list from missingDependencies
+                    const compatibleDeps = await this.dependencyService.getCompatibleDependencies(projectRoot);
+                     const packageVersions = status.missingDependencies.map(pkg => {
+                        const version = compatibleDeps[pkg];
+                        return `${pkg}@${version}`;
+                    });
+                    
+                    await this.packageService.installPackages(projectRoot, packageVersions);
+                }
 
                 progress.report({ message: 'Setup complete!', increment: 100 });
                 
-                this.logger.info('Jest setup completed successfully');
-                vscode.window.showInformationMessage('✅ Jest testing environment setup complete!');
+                this.logger.info('Jest configuration files created successfully');
                 
-                return true;
+                // Return success and install command if dependencies are missing
+                return {
+                    success: true,
+                    installCommand: status.installCommand
+                };
             } catch (error) {
                 this.logger.error('Setup failed', error);
-                vscode.window.showErrorMessage(`Setup failed: ${error}`);
-                return false;
+                return {
+                    success: false
+                };
             }
         });
-    }
 
-    /**
-     * Install dependencies using npm
-     */
-    private async installDependencies(projectRoot: string, packages: string[]): Promise<boolean> {
-        this.logger.info(`Installing packages: ${packages.join(', ')}`);
-
-        const packageVersions = packages.map(pkg => {
-            const version = JEST_DEPENDENCIES[pkg as keyof typeof JEST_DEPENDENCIES];
-            return version ? `${pkg}@${version}` : pkg;
-        });
-
-        return new Promise((resolve) => {
-            const npmProcess = spawn('npm', ['install', '--save-dev', ...packageVersions], {
-                cwd: projectRoot,
-                shell: true,
-                stdio: ['ignore', 'pipe', 'pipe']
-            });
-
-            let output = '';
-            npmProcess.stdout?.on('data', (data) => {
-                output += data.toString();
-            });
-
-            npmProcess.stderr?.on('data', (data) => {
-                output += data.toString();
-            });
-
-            npmProcess.on('close', (code) => {
-                if (code === 0) {
-                    this.logger.info('Dependencies installed successfully');
-                    resolve(true);
-                } else {
-                    this.logger.error('npm install failed', new Error(output));
-                    resolve(false);
-                }
-            });
-
-            npmProcess.on('error', (error) => {
-                this.logger.error('Failed to spawn npm process', error);
-                resolve(false);
-            });
-        });
-    }
-
-    /**
-     * Create jest.config.js
-     */
-    private async createJestConfig(projectRoot: string): Promise<void> {
-        const configPath = path.join(projectRoot, 'jest.config.js');
-        
-        const configContent = `module.exports = ${JSON.stringify(DEFAULT_JEST_CONFIG, null, 2)};
-`;
-
-        fs.writeFileSync(configPath, configContent, 'utf-8');
-        this.logger.info(`Created jest.config.js at ${configPath}`);
-    }
-
-    /**
-     * Create jest.setup.js
-     */
-    private async createJestSetup(projectRoot: string): Promise<void> {
-        const setupPath = path.join(projectRoot, 'jest.setup.js');
-        fs.writeFileSync(setupPath, JEST_SETUP_CONTENT, 'utf-8');
-        this.logger.info(`Created jest.setup.js at ${setupPath}`);
-    }
-
-    /**
-     * Create __mocks__ directory with file mock
-     */
-    private async createMockDirectory(projectRoot: string): Promise<void> {
-        const mocksDir = path.join(projectRoot, '__mocks__');
-        if (!fs.existsSync(mocksDir)) {
-            fs.mkdirSync(mocksDir);
-        }
-
-        const fileMockPath = path.join(mocksDir, 'fileMock.js');
-        if (!fs.existsSync(fileMockPath)) {
-            fs.writeFileSync(fileMockPath, FILE_MOCK_CONTENT, 'utf-8');
-        }
-
-        this.logger.info(`Created __mocks__ directory at ${mocksDir}`);
-    }
-
-    /**
-     * Update package.json to add test scripts
-     */
-    private async updatePackageJsonScripts(projectRoot: string): Promise<void> {
-        const packageJsonPath = path.join(projectRoot, 'package.json');
-        const content = fs.readFileSync(packageJsonPath, 'utf-8');
-        const packageJson = JSON.parse(content);
-
-        if (!packageJson.scripts) {
-            packageJson.scripts = {};
-        }
-
-        // Add test scripts if they don't exist
-        if (!packageJson.scripts.test) {
-            packageJson.scripts.test = 'jest';
-        }
-        if (!packageJson.scripts['test:watch']) {
-            packageJson.scripts['test:watch'] = 'jest --watch';
-        }
-        if (!packageJson.scripts['test:coverage']) {
-            packageJson.scripts['test:coverage'] = 'jest --coverage';
-        }
-
-        fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2), 'utf-8');
-        this.logger.info('Updated package.json scripts');
+        return result;
     }
 
     /**
@@ -391,24 +238,27 @@ export class ProjectSetupService {
 
         const message = statusItems.join('\n');
         
-        if (!status.hasJest || status.missingDependencies.length > 0) {
-            const setup = await vscode.window.showWarningMessage(
-                'Jest testing environment not ready',
-                { modal: true, detail: message },
-                'Setup Now', 'Show Details'
-            );
+        // Log status details to output channel
+        this.logger.info('Project Setup Status:', message);
 
-            if (setup === 'Setup Now') {
-                await this.setupProject(projectRoot, { autoInstall: true });
-            } else if (setup === 'Show Details') {
-                const doc = await vscode.workspace.openTextDocument({
-                    content: message,
-                    language: 'markdown'
-                });
-                await vscode.window.showTextDocument(doc);
-            }
+        if (!status.hasJest || status.missingDependencies.length > 0) {
+            // Show non-blocking warning with actions
+            vscode.window.showWarningMessage(
+                'Jest testing environment not ready',
+                'Setup Now', 'Show Details'
+            ).then(async selection => {
+                if (selection === 'Setup Now') {
+                    await this.setupProject(projectRoot, { autoInstall: true });
+                } else if (selection === 'Show Details') {
+                    const doc = await vscode.workspace.openTextDocument({
+                        content: message,
+                        language: 'markdown'
+                    });
+                    await vscode.window.showTextDocument(doc);
+                }
+            });
         } else {
-            vscode.window.showInformationMessage('✅ Jest environment ready', { detail: message });
+            vscode.window.showInformationMessage('✅ Jest environment ready');
         }
     }
 }

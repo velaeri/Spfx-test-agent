@@ -6,9 +6,12 @@ import { Logger, LogLevel } from './services/Logger';
 import { StateService } from './services/StateService';
 import { ProjectSetupService } from './services/ProjectSetupService';
 import { JestConfigurationService } from './services/JestConfigurationService';
+import { PackageInstallationService } from './services/PackageInstallationService';
+import { DependencyDetectionService } from './services/DependencyDetectionService';
 import { TelemetryService } from './services/TelemetryService';
 import { LLMProviderFactory } from './factories/LLMProviderFactory';
 import { FileScanner } from './utils/FileScanner';
+import { ConfigService } from './services/ConfigService';
 import { 
     WorkspaceNotFoundError, 
     FileValidationError,
@@ -159,8 +162,6 @@ async function ensureJestEnvironment(
     }
 
     // CRITICAL: Also check if ts-jest is physically in node_modules
-    // The package.json check alone is NOT enough — ts-jest might be listed
-    // but never installed (npm install was never run).
     const configService = new JestConfigurationService();
     const tsJestInstalled = configService.isTsJestInstalled(workspaceRoot);
     if (!tsJestInstalled && !setupStatus.missingDependencies.includes('ts-jest')) {
@@ -169,30 +170,91 @@ async function ensureJestEnvironment(
 
     // Check if setup is needed
     if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
-        stream.markdown(`\n❌ **Entorno Jest no está listo**\n\n`);
+        stream.markdown(`\n⚠️ **Entorno Jest incompleto**\n\n`);
         stream.markdown(`- Jest instalado: ${setupStatus.hasJest ? '✅' : '❌'}\n`);
         stream.markdown(`- ts-jest en node_modules: ${tsJestInstalled ? '✅' : '❌ (REQUERIDO)'}\n`);
         stream.markdown(`- Dependencias faltantes: **${setupStatus.missingDependencies.length}**\n\n`);
 
-        if (setupStatus.missingDependencies.length > 0) {
-            stream.markdown(`### 📦 Dependencias Faltantes\n\n`);
-            setupStatus.missingDependencies.forEach(dep => {
-                stream.markdown(`  - \`${dep}\`\n`);
+        //  Use intelligent installation with LLM analysis
+        stream.markdown(`🧠 **Intentando instalación inteligente con análisis de IA...**\n\n`);
+        stream.progress('Analizando proyecto y consultando IA...');
+
+        try {
+            const pkgService = new PackageInstallationService();
+            const depService = new DependencyDetectionService();
+            const config = ConfigService.getConfig();
+
+            // First attempt: try heuristic versions
+            const existingJest = depService.getExistingJestVersion(workspaceRoot);
+            const tsJestVersion = (existingJest && existingJest.major === 28) ? '^28.0.8' : '^29.1.1';
+            const typesJestVersion = (existingJest && existingJest.major === 28) ? '^28.1.0' : '^29.5.11';
+
+            stream.markdown(`📦 Instalando dependencias básicas...\n`);
+            let result = await pkgService.installPackages(workspaceRoot, [
+                `ts-jest@${tsJestVersion}`,
+                `@types/jest@${typesJestVersion}`,
+                'identity-obj-proxy@^3.0.0'
+            ]);
+
+            // If failed, use AI to analyze and fix
+            if (!result.success && result.error) {
+                stream.markdown(`⚠️ Instalación inicial falló. Consultando IA para análisis...\n\n`);
+                
+                const packageJsonPath = path.join(workspaceRoot, 'package.json');
+                const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+
+                const llmProvider = LLMProviderFactory.createProvider();
+                const solution = await llmProvider.analyzeAndFixError(result.error, {
+                    packageJson,
+                    errorType: 'dependency'
+                });
+
+                stream.markdown(`💡 **AI Diagnosis:** ${solution.diagnosis}\n\n`);
+
+                if (solution.packages && solution.packages.length > 0) {
+                    stream.markdown(`📦 Instalando versiones recomendadas por IA: ${solution.packages.join(', ')}\n`);
+                    result = await pkgService.installPackages(workspaceRoot, solution.packages);
+
+                    if (!result.success) {
+                        throw new Error(`AI-recommended installation also failed: ${result.error}`);
+                    }
+                }
+            }
+
+            // Create config files if needed
+            const configCreated = await configService.ensureValidJestConfig(workspaceRoot);
+            if (configCreated) {
+                stream.markdown(`🔧 Creado jest.config.js con ts-jest\n`);
+            }
+
+            const jestSetupPath = path.join(workspaceRoot, 'jest.setup.js');
+            if (!fs.existsSync(jestSetupPath)) {
+                await configService.createJestSetup(workspaceRoot);
+            }
+            await configService.createMockDirectory(workspaceRoot);
+            await configService.updatePackageJsonScripts(workspaceRoot);
+
+            stream.markdown(`\n✅ **Entorno configurado exitosamente con análisis IA**\n\n`);
+            return true;
+        } catch (error) {
+            stream.markdown(`\n❌ **La instalación inteligente falló**\n\n`);
+            logger.error('Intelligent setup failed', error);
+            
+            const errorMsg = error instanceof Error ? error.message : 'Error desconocido';
+            stream.markdown(`Error: ${errorMsg}\n\n`);
+
+            // Fallback: ask user to run manual setup
+            stream.markdown(`### ⚠️ Acción Requerida (setup manual)\n\n`);
+            stream.markdown(`El análisis automático con IA no pudo resolver el problema.\n\n`);
+            stream.markdown(`Por favor, ejecuta \`/setup\` para configuración manual.\n\n`);
+
+            stream.button({
+                command: 'spfx-tester.setup',
+                title: '🛠️ Ejecutar @spfx-tester /setup ahora'
             });
-            stream.markdown(`\n`);
+            
+            return false;
         }
-
-        stream.markdown(`### ⚠️ Acción Requerida (setup obligatorio)\n\n`);
-        stream.markdown(`**No puedo continuar sin las dependencias esenciales.**\n\n`);
-        stream.markdown(`Debes ejecutar \`/setup\` para instalar y verificar el entorno.\n\n`);
-
-        // Offer button to run setup immediately
-        stream.button({
-            command: 'spfx-tester.setup',
-            title: '🛠️ Ejecutar @spfx-tester /setup ahora'
-        });
-        
-        return false;
     } else {
         stream.markdown(`✅ Entorno Jest listo\n\n`);
         return true;

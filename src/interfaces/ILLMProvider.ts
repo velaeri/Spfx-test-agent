@@ -53,4 +53,20 @@ export interface ILLMProvider {
      * Detect missing dependencies based on package.json content
      */
     detectDependencies(packageJsonContent: any): Promise<Record<string, string>>;
+
+    /**
+     * Analyze an error (dependency, compilation, execution) and suggest a fix
+     * Returns installation commands or configuration changes needed
+     */
+    analyzeAndFixError(error: string, projectContext: {
+        packageJson: any;
+        nodeVersion?: string;
+        jestConfig?: string;
+        errorType: 'dependency' | 'compilation' | 'execution';
+    }): Promise<{
+        diagnosis: string;
+        packages?: string[]; // e.g., ['jest@^28.1.0', 'ts-jest@^28.0.8']
+        commands?: string[]; // e.g., ['npm install --force']
+        configChanges?: Record<string, any>;
+    }>;
 }

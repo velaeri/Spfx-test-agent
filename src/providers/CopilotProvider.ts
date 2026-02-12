@@ -115,6 +115,96 @@ export class CopilotProvider implements ILLMProvider {
     }
 
     /**
+     * Analyze an error and suggest a fix using AI
+     */
+    public async analyzeAndFixError(
+        error: string,
+        projectContext: {
+            packageJson: any;
+            nodeVersion?: string;
+            jestConfig?: string;
+            errorType: 'dependency' | 'compilation' | 'execution';
+        }
+    ): Promise<{
+        diagnosis: string;
+        packages?: string[];
+        commands?: string[];
+        configChanges?: Record<string, any>;
+    }> {
+        const systemPrompt = `You are an expert in Node.js dependency management, TypeScript compilation, and Jest testing in SharePoint Framework (SPFx) projects.
+
+Your task is to analyze errors and provide CONCRETE, ACTIONABLE solutions.
+
+RULES:
+1. Identify version conflicts between packages
+2. Consider React version compatibility with testing libraries
+3. Check Jest version compatibility with ts-jest and jest-environment-jsdom
+4. For SPFx projects, respect the existing React version (usually 17.x or 18.x)
+5. Return ONLY valid JSON in the specified format`;
+
+        const deps = {
+            ...projectContext.packageJson.dependencies || {},
+            ...projectContext.packageJson.devDependencies || {}
+        };
+
+        const userPrompt = `**Error Type:** ${projectContext.errorType}
+
+**Error Output:**
+\`\`\`
+${error}
+\`\`\`
+
+**Current Dependencies:**
+\`\`\`json
+${JSON.stringify(deps, null, 2)}
+\`\`\`
+
+${projectContext.nodeVersion ? `**Node Version:** ${projectContext.nodeVersion}\n` : ''}
+${projectContext.jestConfig ? `**Jest Config:**\n\`\`\`javascript\n${projectContext.jestConfig}\n\`\`\`\n` : ''}
+
+**Task:**
+Analyze this error and provide a solution. Return ONLY a JSON object with this structure:
+\`\`\`json
+{
+  "diagnosis": "Brief explanation of what's wrong",
+  "packages": ["package1@version", "package2@version"],
+  "commands": ["optional shell commands if needed"],
+  "configChanges": { "optional": "config updates" }
+}
+\`\`\`
+
+If no packages need installing, use empty array. If no commands needed, omit the field.`;
+
+        try {
+            const result = await this.sendRequest(systemPrompt, userPrompt);
+            
+            // Parse JSON from response
+            const jsonMatch = result.code.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+                this.logger.warn('LLM did not return valid JSON for error analysis');
+                return {
+                    diagnosis: 'Could not analyze error automatically',
+                    packages: []
+                };
+            }
+
+            const parsed = JSON.parse(jsonMatch[0]);
+            return {
+                diagnosis: parsed.diagnosis || 'Unknown issue',
+                packages: parsed.packages || [],
+                commands: parsed.commands,
+                configChanges: parsed.configChanges
+            };
+        } catch (error) {
+            this.logger.error('Failed to analyze error with LLM', error);
+            return {
+                diagnosis: 'Error analysis failed',
+                packages: []
+            };
+        }
+    }
+
+    /**
      * Send a request to the LLM
      */
     private async sendRequest(systemPrompt: string, userPrompt: string): Promise<LLMResult> {

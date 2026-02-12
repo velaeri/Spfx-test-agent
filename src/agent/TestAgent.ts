@@ -274,6 +274,7 @@ export class TestAgent {
 
     /**
      * Ensure environment is ready: Jest, ts-jest, jsdom compatibility
+     * Now uses AI-powered error analysis when installations fail
      */
     private async ensureEnvironment(
         workspaceRoot: string, 
@@ -287,17 +288,30 @@ export class TestAgent {
 
         if (!this.configService.isTsJestInstalled(workspaceRoot)) {
             stream.markdown(`📦 Installing ts-jest...\n`);
+            
+            // First attempt: use heuristic versions
             const existingJest = this.dependencyService.getExistingJestVersion(workspaceRoot);
             const tsJestVersion = (existingJest && existingJest.major === 28) ? '^28.0.8' : '^29.1.1';
             const typesJestVersion = (existingJest && existingJest.major === 28) ? '^28.1.0' : '^29.5.11';
 
-            const ok = await this.packageService.installPackages(workspaceRoot, [
+            let result = await this.packageService.installPackages(workspaceRoot, [
                 `ts-jest@${tsJestVersion}`,
                 `@types/jest@${typesJestVersion}`,
                 'identity-obj-proxy@^3.0.0'
             ]);
-            if (!ok) {
-                throw new TestGenerationError('ts-jest installation failed', 0, 0, '');
+            
+            // If failed, use AI to analyze and fix
+            if (!result.success && result.error) {
+                stream.markdown(`⚠️ Installation failed. Analyzing error with AI...\n`);
+                const fixed = await this.intelligentDependencyFix(
+                    result.error,
+                    workspaceRoot,
+                    stream,
+                    'dependency'
+                );
+                if (!fixed) {
+                    throw new TestGenerationError('ts-jest installation failed after AI analysis', 0, 0, result.error);
+                }
             }
             stream.markdown(`✅ Dependencies installed\n\n`);
         }
@@ -319,6 +333,96 @@ export class TestAgent {
     }
 
     /**
+     * Use AI to analyze a dependency/execution error and apply the fix
+     * Returns true if the issue was resolved
+     */
+    private async intelligentDependencyFix(
+        error: string,
+        workspaceRoot: string,
+        stream: vscode.ChatResponseStream,
+        errorType: 'dependency' | 'compilation' | 'execution',
+        maxRetries = 2
+    ): Promise<boolean> {
+        const packageJsonPath = path.join(workspaceRoot, 'package.json');
+        if (!fs.existsSync(packageJsonPath)) {
+            return false;
+        }
+
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        
+        // Get Node version
+        let nodeVersion: string | undefined;
+        try {
+            const { spawn } = await import('child_process');
+            const proc = spawn('node', ['--version'], { cwd: workspaceRoot, shell: true });
+            nodeVersion = await new Promise<string>((resolve) => {
+                let output = '';
+                proc.stdout?.on('data', (data) => { output += data.toString(); });
+                proc.on('close', () => resolve(output.trim()));
+            });
+        } catch { /* ignore */ }
+
+        // Get Jest config
+        let jestConfig: string | undefined;
+        const jestConfigPath = path.join(workspaceRoot, 'jest.config.js');
+        if (fs.existsSync(jestConfigPath)) {
+            jestConfig = fs.readFileSync(jestConfigPath, 'utf-8');
+        }
+
+        let attempt = 0;
+        while (attempt < maxRetries) {
+            attempt++;
+            stream.progress(`🧠 Consulting AI for solution (attempt ${attempt}/${maxRetries})...`);
+
+            try {
+                const solution = await this.llmProvider.analyzeAndFixError(error, {
+                    packageJson,
+                    nodeVersion,
+                    jestConfig,
+                    errorType
+                });
+
+                stream.markdown(`💡 **AI Diagnosis:** ${solution.diagnosis}\n`);
+
+                // Apply package installations
+                if (solution.packages && solution.packages.length > 0) {
+                    stream.markdown(`📦 Installing: ${solution.packages.join(', ')}\n`);
+                    const result = await this.packageService.installPackages(workspaceRoot, solution.packages);
+                    
+                    if (!result.success && result.error) {
+                        error = result.error; // Update error for next retry
+                        stream.markdown(`⚠️ Installation failed, retrying with updated context...\n`);
+                        continue;
+                    }
+                }
+
+                // Execute additional commands if needed
+                if (solution.commands && solution.commands.length > 0) {
+                    for (const cmd of solution.commands) {
+                        stream.markdown(`⚙️ Running: \`${cmd}\`\n`);
+                        // Execute command (simplified - you may want more robust execution)
+                        const { spawn } = await import('child_process');
+                        await new Promise<void>((resolve) => {
+                            const proc = spawn(cmd, [], { cwd: workspaceRoot, shell: true });
+                            proc.on('close', () => resolve());
+                        });
+                    }
+                }
+
+                stream.markdown(`✅ Applied AI-suggested fix\n\n`);
+                return true;
+            } catch (err) {
+                this.logger.error(`AI fix attempt ${attempt} failed`, err);
+                if (attempt === maxRetries) {
+                    return false;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Ensure jest-environment-jsdom is compatible with the installed Jest version
      */
     private async ensureJsdomCompatibility(
@@ -331,10 +435,10 @@ export class TestAgent {
         const jsdomEnvPath = path.join(workspaceRoot, 'node_modules', 'jest-environment-jsdom');
         if (!fs.existsSync(jsdomEnvPath)) {
             const version = jestVersion.major >= 29 ? '^29.0.0' : `^${jestVersion.major}.0.0`;
-            const ok = await this.packageService.installPackages(workspaceRoot, [
+            const result = await this.packageService.installPackages(workspaceRoot, [
                 `jest-environment-jsdom@${version}`
             ]);
-            if (ok) {
+            if (result.success) {
                 stream.markdown(`📦 Installed jest-environment-jsdom@${version}\n`);
             }
             return;
@@ -408,9 +512,10 @@ export class TestAgent {
         if (issue.fixType === 'jsdom') {
             const jestVersion = this.dependencyService.getExistingJestVersion(workspaceRoot);
             const targetVersion = jestVersion ? `^${jestVersion.major}.0.0` : '^29.0.0';
-            return await this.packageService.installPackages(workspaceRoot, [
+            const result = await this.packageService.installPackages(workspaceRoot, [
                 `jest-environment-jsdom@${targetVersion}`
             ]);
+            return result.success;
         }
         return false;
     }

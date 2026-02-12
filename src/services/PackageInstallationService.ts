@@ -1,6 +1,11 @@
 import { spawn } from 'child_process';
 import { Logger } from './Logger';
 
+export interface InstallResult {
+    success: boolean;
+    error?: string;
+}
+
 export class PackageInstallationService {
     private logger: Logger;
 
@@ -12,8 +17,9 @@ export class PackageInstallationService {
      * Install dependencies using npm
      * @param projectRoot Root directory of the project
      * @param packagesWithVersions List of packages with versions (e.g. ['jest@^29.7.0', 'ts-jest@^29.1.1'])
+     * @returns Promise with success status and error message if failed
      */
-    async installPackages(projectRoot: string, packagesWithVersions: string[]): Promise<boolean> {
+    async installPackages(projectRoot: string, packagesWithVersions: string[]): Promise<InstallResult> {
         this.logger.info(`Installing packages: ${packagesWithVersions.join(', ')}`);
 
         return new Promise((resolve) => {
@@ -36,16 +42,16 @@ export class PackageInstallationService {
             npmProcess.on('close', (code) => {
                 if (code === 0) {
                     this.logger.info('Dependencies installed successfully');
-                    resolve(true);
+                    resolve({ success: true });
                 } else {
                     this.logger.error('npm install failed', new Error(output));
-                    resolve(false);
+                    resolve({ success: false, error: output });
                 }
             });
 
             npmProcess.on('error', (error) => {
                 this.logger.error('Failed to spawn npm process', error);
-                resolve(false);
+                resolve({ success: false, error: error.message });
             });
         });
     }

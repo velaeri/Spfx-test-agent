@@ -70,14 +70,33 @@ export class TestAgent {
      * @param sourceFilePath - Absolute path to the source file (e.g., MyComponent.tsx)
      * @param workspaceRoot - Root directory of the workspace
      * @param stream - VS Code chat response stream for progress updates
+     * @param mode - Generation mode (fast/balanced/thorough), defaults to balanced
      * @returns Path to the generated test file
      */
     async generateAndHealTest(
         sourceFilePath: string,
         workspaceRoot: string,
-        stream: vscode.ChatResponseStream
+        stream: vscode.ChatResponseStream,
+        mode: 'fast' | 'balanced' | 'thorough' = 'balanced'
     ): Promise<string> {
         const config = ConfigService.getConfig();
+        
+        // Override maxHealingAttempts based on mode
+        let effectiveMaxAttempts = config.maxHealingAttempts;
+        let shouldExecuteTests = true;
+        
+        switch (mode) {
+            case 'fast':
+                effectiveMaxAttempts = 0;
+                shouldExecuteTests = false;
+                break;
+            case 'balanced':
+                effectiveMaxAttempts = 1;
+                break;
+            case 'thorough':
+                effectiveMaxAttempts = 3;
+                break;
+        }
         const startTime = Date.now();
         const errorPatterns: string[] = [];
 
@@ -117,9 +136,21 @@ export class TestAgent {
         });
 
         fs.writeFileSync(testFilePath, result.code, 'utf-8');
-        this.logger.info('Initial test file generated', { model: result.model });
+        this.logger.info('Initial test file generated', { model: result.model, mode });
 
         stream.markdown(`✅ Generated test file: \`${path.relative(workspaceRoot, testFilePath)}\`\n\n`);
+        
+        // FAST mode: Skip test execution
+        if (!shouldExecuteTests) {
+            stream.markdown(`⚡ **Modo FAST**: Test generado sin ejecutar\n\n`);
+            stream.markdown(`💡 Revisa el test manualmente o ejecútalo con: \`npm test ${path.basename(testFilePath)}\`\n`);
+            
+            const duration = Date.now() - startTime;
+            this.telemetryService.trackTestGeneration(true, 1, duration);
+            
+            return testFilePath;
+        }
+        
         stream.progress('Running test...');
 
         // Run the test
@@ -129,7 +160,7 @@ export class TestAgent {
         let attempt = 1;
         let rateLimitRetries = 0;
         
-        while (!testResult.success && attempt < config.maxHealingAttempts) {
+        while (!testResult.success && attempt < effectiveMaxAttempts) {
             attempt++;
             
             stream.markdown(`⚠️ Test failed on attempt ${attempt - 1}. Analyzing errors...\n\n`);
@@ -142,7 +173,7 @@ export class TestAgent {
             this.telemetryService.trackHealingAttempt(attempt, 'JestTestFailure');
             
             stream.markdown(`**Error Summary:** ${summary.failed} failed, ${summary.passed} passed\n\n`);
-            stream.progress(`Healing test (attempt ${attempt}/${config.maxHealingAttempts})...`);
+            stream.progress(`Healing test (attempt ${attempt}/${effectiveMaxAttempts})...`);
 
             // Wait briefly to avoid rate limits (exponential backoff)
             await this.sleep(config.initialBackoffMs * attempt);

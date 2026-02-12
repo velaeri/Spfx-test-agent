@@ -73,9 +73,11 @@ export class CopilotProvider implements ILLMProvider {
         this.logger.info(`Generating test for ${context.fileName} (attempt ${context.attempt || 1})`);
 
         const systemPrompt = PROMPTS.SYSTEM;
-        const userPrompt = context.errorContext
-            ? this.buildFixPrompt(context)
-            : PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode);
+        const userPrompt = PROMPTS.GENERATE_TEST(
+            context.fileName, 
+            context.sourceCode, 
+            context.dependencyContext || ''
+        );
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -91,7 +93,16 @@ export class CopilotProvider implements ILLMProvider {
         }
 
         const systemPrompt = PROMPTS.SYSTEM;
-        const userPrompt = this.buildFixPrompt(context);
+        const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
+        const userPrompt = PROMPTS.FIX_TEST(
+            attemptStr,
+            context.fileName,
+            context.currentTestCode || '',
+            context.errorContext,
+            context.sourceCode,
+            context.dependencyContext || '',
+            context.environmentHints || ''
+        );
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -214,25 +225,6 @@ export class CopilotProvider implements ILLMProvider {
         } finally {
             cancellationTokenSource.dispose();
         }
-    }
-
-    /**
-     * Build the fix prompt when test fails
-     */
-    private buildFixPrompt(context: TestContext): string {
-        const errorContext = context.errorContext || '';
-        const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
-        
-        // Detect common error patterns
-        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token') || errorContext.includes('Missing semicolon');
-        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft') || errorContext.includes('vscode');
-        
-        let specificGuidance = '';
-        if (isSyntaxError && isMockError) {
-            specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
-        }
-
-        return PROMPTS.FIX_TEST(attemptStr, context.fileName, errorContext, specificGuidance, context.sourceCode);
     }
 
     /**

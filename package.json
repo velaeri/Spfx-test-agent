@@ -2,7 +2,7 @@
   "name": "spfx-test-agent",
   "displayName": "SPFX Test Agent",
   "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
-  "version": "0.4.22",
+  "version": "0.4.26",
   "publisher": "velaeri",
   "repository": {
     "type": "git",
@@ -164,18 +164,16 @@
     "version:minor": "npm version minor --no-git-tag-version",
     "version:major": "npm version major --no-git-tag-version",
     "deploy": "npm run clean && npm run version:patch && npm run package:vsix && npm run install:vsix",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "test": "echo \"No tests specified\""
   },
   "devDependencies": {
-    "@types/jest": "^29.5.0",
     "@types/node": "^18.x",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "@vscode/vsce": "^3.7.1",
     "eslint": "^8.56.0",
-    "jest": "^29.7.0",
-    "ts-jest": "^29.1.0",
     "ts-loader": "^9.5.1",
     "typescript": "^5.3.3",
     "webpack": "^5.89.0",

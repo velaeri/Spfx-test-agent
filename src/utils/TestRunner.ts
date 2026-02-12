@@ -120,10 +120,15 @@ export class TestRunner {
         const baseArgs = commandParts.slice(1);
 
         // Build arguments array (safer than string concatenation)
-        // CRITICAL: Use --testPathPattern with forward slashes for Windows compatibility.
-        // Jest interprets the positional file argument as a regex, and Windows backslashes
-        // break the regex matching, causing Jest to run ALL test files instead of just one.
-        const testPathPattern = normalizedTestPath.replace(/\\/g, '/');
+        // CRITICAL: Use --testPathPattern with an escaped regex for exact file matching.
+        // Jest interprets the argument as a regex, so:
+        //   1. Convert Windows backslashes to forward slashes
+        //   2. Escape regex-special characters (dots, parens, brackets, etc.)
+        //   3. Add $ anchor so "index.test.ts" doesn't match "index.test.tsx.backup"
+        const testPathForwardSlashes = normalizedTestPath.replace(/\\/g, '/');
+        const testPathPattern = testPathForwardSlashes
+            .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // escape ALL regex special chars
+            + '$'; // anchor to end of path
         const args = [
             ...baseArgs,
             '--testPathPattern',

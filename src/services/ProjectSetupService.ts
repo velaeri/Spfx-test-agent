@@ -208,6 +208,60 @@ export class ProjectSetupService {
     }
 
     /**
+     * Verify the installation by running a dummy test
+     */
+    async verifyInstallation(projectRoot: string): Promise<{ success: boolean; message: string }> {
+        const testRunner = new (await import('../utils/TestRunner')).TestRunner();
+        
+        // Create a temporary verification test file
+        const verifyFile = path.join(projectRoot, 'src', 'verify-setup.test.ts');
+        const verifyContent = `
+describe('Setup Verification', () => {
+    it('should run a simple test', () => {
+        expect(true).toBe(true);
+    });
+});
+`;
+        
+        try {
+            // Ensure src directory exists
+            const srcDir = path.dirname(verifyFile);
+            if (!fs.existsSync(srcDir)) {
+                fs.mkdirSync(srcDir, { recursive: true });
+            }
+
+            fs.writeFileSync(verifyFile, verifyContent, 'utf-8');
+            
+            // Run the test
+            this.logger.info('Running verification test...');
+            const result = await testRunner.runTest(verifyFile, projectRoot);
+            
+            // Cleanup
+            if (fs.existsSync(verifyFile)) {
+                fs.unlinkSync(verifyFile);
+            }
+            
+            if (result.success) {
+                return { success: true, message: 'Verification test passed' };
+            } else {
+                return { 
+                    success: false, 
+                    message: `Verification failed: ${result.output.substring(0, 200)}...` 
+                };
+            }
+        } catch (error) {
+            // Cleanup on error
+            if (fs.existsSync(verifyFile)) {
+                try { fs.unlinkSync(verifyFile); } catch {}
+            }
+            return { 
+                success: false, 
+                message: `Verification error: ${error instanceof Error ? error.message : String(error)}` 
+            };
+        }
+    }
+
+    /**
      * Show setup status to user
      */
     async showSetupStatus(projectRoot: string): Promise<void> {

@@ -4,7 +4,13 @@
 export interface TestContext {
     sourceCode: string;
     fileName: string;
+    /** Formatted string with all dependency file contents */
+    dependencyContext?: string;
     errorContext?: string;
+    /** The current test code (for fix attempts) */
+    currentTestCode?: string;
+    /** Hints about environment issues detected */
+    environmentHints?: string;
     attempt?: number;
     maxAttempts?: number;
 }

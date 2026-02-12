@@ -7,6 +7,7 @@ import { StateService } from './services/StateService';
 import { ProjectSetupService } from './services/ProjectSetupService';
 import { JestConfigurationService } from './services/JestConfigurationService';
 import { TelemetryService } from './services/TelemetryService';
+import { LLMProviderFactory } from './factories/LLMProviderFactory';
 import { FileScanner } from './utils/FileScanner';
 import { 
     WorkspaceNotFoundError, 
@@ -104,20 +105,38 @@ export async function handleSetupRequest(
     const configService = new JestConfigurationService();
     const tsJestInstalled = configService.isTsJestInstalled(workspaceRoot);
 
+    // Run verification test
+    let verificationPassed = false;
+    let verificationMsg = '';
+
     if (verifyStatus.missingDependencies.length === 0 && tsJestInstalled) {
-         stream.markdown(`\n🎉 **Configuración Completada Exitosamente**\n\n`);
+        stream.progress('Ejecutando test de verificación...');
+        const verifyResult = await setupService.verifyInstallation(workspaceRoot);
+        verificationPassed = verifyResult.success;
+        verificationMsg = verifyResult.message;
+    }
+
+    if (verifyStatus.missingDependencies.length === 0 && tsJestInstalled && verificationPassed) {
+         stream.markdown(`\n🎉 **Configuración Completada y Verificada**\n\n`);
          stream.markdown(`✅ Dependencias instaladas (Jest, ts-jest, types)\n`);
          stream.markdown(`✅ Archivos de configuración creados\n`);
-         stream.markdown(`✅ Scripts de package.json actualizados\n\n`);
+         stream.markdown(`✅ Scripts de package.json actualizados\n`);
+         stream.markdown(`✅ **Test de verificación pasado correctamente**\n\n`);
          stream.markdown(`**Listo para usar:** \`@spfx-tester /generate-all\`\n`);
          telemetryService.trackSetup(true, Date.now() - setupStartTime);
          return { metadata: { command: 'setup' } };
     } else {
           stream.markdown(`\n⚠️ **Advertencia post-instalación**\n\n`);
-          stream.markdown(`Aunque el proceso terminó, aún parecen faltar dependencias:\n`);
-          if (!tsJestInstalled) stream.markdown(`- \`ts-jest\` no encontrado en node_modules\n`);
-          verifyStatus.missingDependencies.forEach(d => stream.markdown(`- \`${d}\`\n`));
-          stream.markdown(`\nIntenta ejecutar manualmente: \`npm install\`\n`);
+          stream.markdown(`El proceso terminó, pero hubo problemas de verificación:\n`);
+          if (!tsJestInstalled) stream.markdown(`- ❌ \`ts-jest\` no encontrado en node_modules\n`);
+          verifyStatus.missingDependencies.forEach(d => stream.markdown(`- ❌ Faltante: \`${d}\`\n`));
+          
+          if (!verificationPassed && verificationMsg) {
+             stream.markdown(`- ❌ **El test de verificación falló:**\n`);
+             stream.markdown(`\`\`\`\n${verificationMsg}\n\`\`\`\n`);
+          }
+
+          stream.markdown(`\nIntenta ejecutar manualmente: \`npm install\` y revisa los logs.\n`);
           return { errorDetails: { message: 'Verification failed' } };
     }
 }
@@ -238,7 +257,8 @@ export async function handleGenerateSingleRequest(
     stream.markdown(`Usando workflow agentico con capacidades de auto-reparación...\n\n`);
 
     // Create and run the test agent
-    const agent = new TestAgent(undefined, stateService);
+    const llmProvider = LLMProviderFactory.createProvider();
+    const agent = new TestAgent(llmProvider, stateService);
     
     try {
         const testFilePath = await agent.generateAndHealTest(
@@ -361,7 +381,8 @@ export async function handleGenerateAllRequest(
     for (const [projectRoot, files] of projectMap.entries()) {
         stream.markdown(`### Proyecto: \`${path.basename(projectRoot)}\`\n\n`);
         
-        const agent = new TestAgent(undefined, stateService);
+        const llmProvider = LLMProviderFactory.createProvider();
+        const agent = new TestAgent(llmProvider, stateService);
 
         for (const file of files) {
             if (token.isCancellationRequested) {

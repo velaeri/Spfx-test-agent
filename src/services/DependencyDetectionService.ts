@@ -3,8 +3,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { Logger } from './Logger';
 import { ConfigService } from './ConfigService';
-import { CopilotProvider } from '../providers/CopilotProvider';
-import { AzureOpenAIProvider } from '../providers/AzureOpenAIProvider';
+import { LLMProviderFactory } from '../factories/LLMProviderFactory';
 import { ILLMProvider } from '../interfaces/ILLMProvider';
 import { JEST_DEPENDENCIES, JEST_28_COMPATIBLE_DEPENDENCIES } from '../utils/constants';
 
@@ -16,18 +15,7 @@ export class DependencyDetectionService {
 
     constructor() {
         this.logger = Logger.getInstance();
-        const config = ConfigService.getConfig();
-        
-        // Check if Azure OpenAI is configured
-        const hasAzureConfig = config.azureOpenAI?.endpoint && 
-                             config.azureOpenAI?.apiKey && 
-                             config.azureOpenAI?.deploymentName;
-
-        if (hasAzureConfig) {
-            this.llmProvider = new AzureOpenAIProvider();
-        } else {
-            this.llmProvider = new CopilotProvider(config.llmVendor, config.llmFamily);
-        }
+        this.llmProvider = LLMProviderFactory.createProvider();
     }
 
     /**

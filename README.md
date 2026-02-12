@@ -1,257 +1,112 @@
-# SPFX Test Agent - Agentic Workflow Extension
+# SPFX Test Agent - Ingeniero de QA Autónomo para SharePoint
 
-Extensión de Visual Studio Code que implementa un **workflow agéntico autónomo** para generación automática de tests unitarios en proyectos SharePoint Framework (SPFx). No es un simple asistente de chat—es un agente auto-reparable que genera tests, los ejecuta y corrige errores automáticamente.
+**SPFX Test Agent** es una extensión revolucionaria para Visual Studio Code que transforma tu flujo de trabajo de desarrollo en SharePoint Framework.
 
-## ✨ Novedades en v0.3.0
+No es un simple asistente de chat — es un **agente autónomo inteligente** que actúa como un ingeniero de QA senior. Entiende la arquitectura de tu proyecto, analiza las dependencias de tus archivos, genera pruebas unitarias robustas en Jest y **se auto-repara** cuando algo falla.
 
-### 🌍 Interfaz en Castellano
-- Todos los mensajes ahora en español
-- Errores, advertencias y consejos localizados
-- Mejor experiencia para usuarios hispanohablantes
+## 🚀 Novedades en v0.4.26 (Actual)
 
-### 🎯 Modelo Flexible
-- **Usa tu modelo seleccionado**: Ya no fuerza GPT-4
-- Compatible con cualquier modelo disponible en Copilot
-- Configuración automática del modelo del usuario
+### 🧠 Inteligencia Contextual Profunda (Nuevo)
+El agente ya no "adivina" los mocks. Ahora lee y entiende tu proyecto completo:
+- **Análisis de Dependencias**: Lee los archivos importados para entender interfaces y tipos reales (`SourceContextCollector`).
+- **Detección de Patrones SPFx**: Identifica automáticamente si es un WebPart, una Extensión, o usa PnP JS / Fluent UI.
+- **Contexto de Configuración**: Lee tu `tsconfig.json` y `package.json` para adaptar los tests a tu entorno exacto.
 
-### 📦 Versión Anterior (v0.2.0)
-- Auto-instalación de dependencias Jest
-- Configuración automática de proyecto
-- Generación por lotes de tests
+### 🔧 Auto-Reparación de Infraestructura (Nuevo)
+El agente distingue entre "tu código está mal" y "tu entorno está mal configured":
+- **Fix Automático de JSDOM**: Detecta errores comunes como `getVmContext` y corrige versiones de `jest-environment-jsdom` automáticamente.
+- **Gestión de Versiones**: Sugiere e instala versiones de librerías compatibles con tu versión de SPFx (soporte para SPFx 1.14 - 1.18+).
 
-## Características
+### 🤖 Soporte Multi-Proveedor LLM
+- **GitHub Copilot**: Integración nativa sin configuración extra.
+- **Azure OpenAI**: (Nuevo) Puedes configurar tu propio endpoint de Azure OpenAI si prefieres usar tus modelos corporativos.
 
-### Capacidades Principales
-- **🤖 Generación Autónoma**: Crea tests Jest completos para componentes SPFx automáticamente
-- **🔄 Auto-Reparación**: Ejecuta tests, analiza fallos y los corrige iterativamente (hasta 3 intentos)
-- **🧠 Powered by AI**: Usa GitHub Copilot para generación inteligente de código
-- **🎯 Optimizado para SPFx**: Conocimiento built-in de patrones SharePoint Framework
+## Características Principales
 
-### Características v0.5.0 (Actual)
-- **🛑 Setup Estricto**: `/generate-all` ahora bloquea ejecución si el entorno no es válido
-- **📦 Instalación Inteligente**: `/setup` detecta versiones compatibles y las instala automáticamente
-- **🔍 Verificación Post-Setup**: `/setup` verifica que `ts-jest` esté realmente instalado
-- **🌍 Fixes de TypeScript**: Manejo robusto de `ts-jest` para evitar errores "Missing semicolon"
-- **🛑 Protección contra Babel**: Configuración forzada de `ts-jest` para evitar parsers incorrectos
+### 🔄 Ciclo de Vida Autónomo
+1. **Analiza**: Lee tu código fuente y navega por sus importaciones.
+2. **Genera**: Escribe un test completo usando patrones de mocking específicos para SPFx.
+3. **Ejecuta**: Lanza Jest en un proceso aislado solo para ese archivo.
+4. **Repara**: Si falla, analiza el error, lee el código del test actual y aplica correcciones (hasta 3/5 intentos según modo).
 
-### Características v0.3.0
-- **🌍 Interfaz en Castellano**: Mensajes, errores y ayudas en español
-- **🎯 Modelo Dinámico**: Usa el modelo que tengas seleccionado en Copilot
-- **📦 Auto-Setup**: Detecta dependencias faltantes y las instala automáticamente
-- **🔧 Configuración Inteligente**: Crea jest.config.js óptimo para SPFx
+### 🛡️ Entorno Robusto
+- **Setup Inteligente**: El comando `/setup` no solo instala paquetes, sino que configura `jest.config.js`, `jest.setup.js` y scripts de `package.json` optimizados para SharePoint.
+- **Limpieza de Ruido**: Los logs de Jest son procesados para que el LLM se enfoque solo en el error real, ignorando ruido de consola.
 
-### Características Técnicas
-- **🧹 Parsing Inteligente**: Limpia output de Jest reduciendo ruido
-- **⚡ Progreso en Tiempo Real**: Observa el agente trabajar via chat
-- **🛡️ Seguridad**: Usa spawn en lugar de exec para prevenir inyección
-- **📊 Gestión de Estado**: Rastrea historial de generación
-- **🎨 Configurable**: 11+ settings para personalizar comportamiento
+## Instalación y Requisitos
 
-## Requisitos
+**Requisitos Previos:**
+- VS Code 1.85.0+
+- Node.js v18+
+- Una suscripción activa a **GitHub Copilot** (o acceso a Azure OpenAI)
 
-- **VS Code**: Version 1.85.0 o superior
-- **GitHub Copilot**: Debe estar instalado y activado
-- **Node.js**: v18 o superior
-- **Jest**: ~~Debe estar instalado~~ → **¡Ahora se auto-instala!** 🎉
+**Instalación:**
+1. Instala la extensión desde el Marketplace (o carga el `.vsix`).
+2. Abre tu proyecto SPFx.
 
-## Instalación
+## Guía de Uso
 
-### Desde Código Fuente
+### 1. Configuración Inicial
+Si es tu primera vez probando este proyecto:
+1. Abre el Chat de Copilot (`Ctrl+Alt+I`).
+2. Escribe: `@spfx-tester /setup`
+   - El agente instalará `jest`, `ts-jest`, `identity-obj-proxy` y configurará todo automáticamente.
 
-1. Clona este repositorio
-2. Instala dependencias:
-   ```bash
-   npm install
-   ```
-3. Compila la extensión:
-   ```bash
-   npm run compile
-   ```
-4. Press F5 to open a new VS Code window with the extension loaded
+### 2. Generar Tests
+1. Abre cualquier archivo TypeScript/React (`.ts` o `.tsx`).
+2. En el chat, escribe: `@spfx-tester /generate`
+   - Opción: `@spfx-tester /generate --mode thorough` para 5 intentos de auto-reparación.
 
-## Usage
+### 3. Ejemplo de Flujo Real
 
-### Generating Tests
+```text
+Tú: @spfx-tester /generate
 
-1. Open an SPFx component file (e.g., `MyWebPart.tsx`)
-2. Open the chat panel in VS Code (View > Chat or `Ctrl+Alt+I`)
-3. Type `@spfx-tester generate`
-4. Watch the agent work:
-   - 📖 Reads your source code
-   - 🧠 Generates initial test using your configured Copilot model
-   - ✅ Runs the test with Jest
-   - 🔄 If failed, analyzes errors and regenerates (up to 3 times)
-   - 📝 Opens the final test file for you
-
-### Example Workflow
-
-```
-You: @spfx-tester generate
-
-Agent: 🚀 Generating Tests for MyWebPart.tsx
-       Using agentic workflow with self-healing capabilities...
+Agente: 🚀 Iniciando generación para HelloWorld.tsx
+       📦 Analizadas 4 dependencias importadas
+       🔍 Detectado: React Component, SPFx WebPart Context
        
-       ✅ Generated test file: MyWebPart.test.tsx
-       Running test...
+       ✅ Test generado: HelloWorld.test.tsx
+       Ejecutando Jest...
        
-       ⚠️ Test failed on attempt 1. Analyzing errors...
-       Error Summary: 1 failed, 0 passed
+       ⚠️ El test falló (intento 1/3). 
+       Error: "Text 'Welcome' not found in document"
+       Analizando causa raíz...
        
-       🔄 Updated test file (attempt 2)
-       Running test again...
+       🔄 Corrigiendo test (intento 2)...
+       Ajustando selector de testing-library...
        
-       ✅ Test passed successfully!
-       Final Results: 5 passed, 5 total
-       
-       📝 Test file opened: MyWebPart.test.tsx
+       ✅ ¡Test Pasado! (Total: 4.2s)
+       📊 1 passed, 0 failed
 ```
 
-## How It Works
+## Arquitectura Técnica
 
-### The Agentic Loop
+El agente opera mediante un sistema de **Inyección de Dependencias** y **Patrón Factoría**:
 
-```
-1. Read Source Code
-   ↓
-2. Generate Test (AI)
-   ↓
-3. Save Test File
-   ↓
-4. Run Jest
-   ↓
-5. Test Passed? → YES → ✅ Done
-   ↓ NO
-6. Parse Error (Clean)
-   ↓
-7. Attempts < 3? → YES → Back to Step 2 (with error context)
-   ↓ NO
-8. ❌ Report Final Status
-```
+- **Core Agent**: Orquesta el ciclo de lectura-escritura-ejecución.
+- **SourceContextCollector**: "Araña" el sistema de archivos para construir un mapa mental del código.
+- **LLM Provider Factory**: Abstrae la inteligencia (Copilot o Azure OpenAI).
+- **Test Runner Isolator**: Ejecuta Jest de forma quirúrgica sobre un solo archivo.
 
-### System Prompt (Built-in SPFx Knowledge)
+### Configuración Avanzada
 
-The agent uses a specialized system prompt that includes:
-- SPFx-specific mocking patterns (`@microsoft/sp-*`)
-- Preference for React Testing Library over Enzyme
-- TypeScript strict typing requirements
-- Jest best practices
-- Mock patterns for SharePoint context
+Puedes personalizar el comportamiento en `settings.json`:
+- `spfxTestAgent.maxHealingAttempts`: Número de intentos de auto-corrección (Default: 3).
+- `spfxTestAgent.azureOpenAI`: Configuración para usar Azure en lugar de Copilot.
+- `spfxTestAgent.testFilePattern`: Patrón de nombrado (ej: `${fileName}.test.${ext}`).
 
-## Development
+## Solución de Problemas
 
-### Building
+### "Jest command failed"
+Asegúrate de haber ejecutado `@spfx-tester /setup` primero. El agente intentará detectar si faltan paquetes y te ofrecerá instalarlos.
 
-```bash
-# Install dependencies
-npm install
+### "Rate Limited"
+Si usas la API pública de Copilot mucho, puedes sufrir limitaciones de velocidad. El agente tiene "backoff exponencial" (espera inteligente), pero puedes pausar unos segundos.
 
-# Compile TypeScript
-npm run compile
+### Errores de "getVmContext"
+Esto suele ser un conflicto entre Jest 29+ y JSDOM. El agente ahora detecta esto y lo arregla automáticamente instalando el entorno correcto.
 
-# Watch for changes
-npm run watch
-
-# Package for production
-npm run package
-```
-
-### Debugging
-
-1. Open the project in VS Code
-2. Press F5 to start debugging
-3. A new VS Code window will open with the extension loaded
-4. Open an SPFx project in the new window
-5. Open a component file and invoke `@spfx-tester generate`
-
-## Project Structure
-
-```
-├── src/
-│   ├── extension.ts              # Entry point, chat participant registration
-│   ├── agent/
-│   │   └── TestAgent.ts          # Core agentic loop logic
-│   └── utils/
-│       ├── TestRunner.ts         # Jest execution wrapper
-│       └── JestLogParser.ts      # Error parsing and cleaning
-├── .vscode/
-│   ├── launch.json               # Debug configuration
-│   └── tasks.json                # Build tasks
-├── package.json                  # Extension manifest
-├── tsconfig.json                 # TypeScript configuration
-├── webpack.config.js             # Webpack bundling
-└── README.md                     # This file
-```
-
-## Technical Details
-
-### Model Selection
-
-The extension dynamically uses the model you have selected in GitHub Copilot:
-- Respects your **Copilot Chat** model preference (GPT-4o, GPT-4, etc.)
-- Includes an automatic **fallback system** to find the best available model
-- Ensures compatibility with various Copilot subscriptions
-
-```typescript
-// Conceptual logic
-const model = await selectUserPreferredModel() || await selectBestAvailableFallback();
-```
-
-### Error Handling
-
-- **Rate Limiting**: Exponential backoff (1s, 2s, 3s)
-- **Missing Dependencies**: Clear error messages with installation instructions
-- **Model Unavailable**: Validates GitHub Copilot is installed
-- **Jest Errors**: Parses and cleans output for better LLM understanding
-
-### Token Optimization
-
-The JestLogParser reduces token usage by:
-- Removing ANSI escape codes (~20% reduction)
-- Filtering node_modules stack traces (~40% reduction)
-- Extracting only relevant error messages (~60% reduction)
-- Truncating to 1500 characters max
-
-## Limitations
-
-- Maximum 3 self-healing attempts per test
-- Requires GitHub Copilot subscription
-- Only supports TypeScript/TSX files
-- Requires Jest to be configured in the project
-
-## Troubleshooting
-
-### "Jest is not installed"
-```bash
-npm install --save-dev jest @types/jest ts-jest
-```
-
-### "No suitable AI model available"
-- Ensure GitHub Copilot extension is installed
-- Verify you're signed in to GitHub Copilot
-- Check your Copilot subscription is active
-
-### "Test keeps failing"
-The agent will try 3 times. If it still fails:
-1. Review the generated test manually
-2. Check for missing dependencies or mocks
-3. Ensure your source code follows SPFx patterns
-
-## Contributing
-
-This extension uses a modular architecture. To add new features:
-
-1. **New Test Types**: Extend `TestAgent.buildSystemPrompt()`
-2. **Better Parsing**: Enhance `JestLogParser.cleanJestOutput()`
-3. **Alternative Runners**: Implement interface in `TestRunner.ts`
-
-## License
-
-This project is open source and available under the MIT License.
-
-## Acknowledgments
-
-Built with:
-- VS Code Extension API
-- GitHub Copilot Language Model API
-- Jest Testing Framework
-- TypeScript
+---
+**Desarrollado con ❤️ para la comunidad de SharePoint Framework.**
+Licencia MIT.

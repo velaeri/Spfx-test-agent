@@ -41,7 +41,7 @@ export class AzureOpenAIProvider implements ILLMProvider {
     }
 
     public async generateTest(context: TestContext): Promise<LLMResult> {
-        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI');
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
 
         const systemPrompt = PROMPTS.SYSTEM;
         const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode);
@@ -50,18 +50,17 @@ export class AzureOpenAIProvider implements ILLMProvider {
     }
 
     public async fixTest(context: TestContext): Promise<LLMResult> {
-        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI');
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
         if (!context.errorContext) throw new Error('Error context required');
 
         const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
         
         const errorContext = context.errorContext || '';
-        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token');
-        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft');
-        const isTypeError = errorContext.includes('expected ","') && errorContext.includes('props:');
+        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token') || errorContext.includes('Missing semicolon');
+        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft') || errorContext.includes('vscode');
 
         let specificGuidance = '';
-        if (isSyntaxError && isMockError && isTypeError) {
+        if (isSyntaxError && isMockError) {
             specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
         }
 
@@ -71,7 +70,7 @@ export class AzureOpenAIProvider implements ILLMProvider {
     }
 
     public async detectDependencies(packageJsonContent: any): Promise<Record<string, string>> {
-        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI');
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
         
         const prompt = `Analyze this package.json and determine which Jest testing dependencies are missing or need to be installed.
 
@@ -139,7 +138,7 @@ If ALL packages are already installed, return:
     }
 
     private async sendRequest(systemPrompt: string, userPrompt: string): Promise<LLMResult> {
-        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI');
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
         
         try {
             const messages = [

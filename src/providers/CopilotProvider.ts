@@ -3,6 +3,9 @@ import { ILLMProvider, TestContext, LLMResult } from '../interfaces/ILLMProvider
 import { LLMNotAvailableError, LLMTimeoutError, RateLimitError } from '../errors/CustomErrors';
 import { Logger } from '../services/Logger';
 
+import { ConfigService } from '../services/ConfigService';
+import { PROMPTS } from '../utils/prompts';
+
 /**
  * Copilot-based LLM Provider
  * Uses VS Code's Language Model API to interact with GitHub Copilot
@@ -69,10 +72,10 @@ export class CopilotProvider implements ILLMProvider {
     public async generateTest(context: TestContext): Promise<LLMResult> {
         this.logger.info(`Generating test for ${context.fileName} (attempt ${context.attempt || 1})`);
 
-        const systemPrompt = this.buildSystemPrompt();
+        const systemPrompt = PROMPTS.SYSTEM;
         const userPrompt = context.errorContext
             ? this.buildFixPrompt(context)
-            : this.buildInitialPrompt(context);
+            : PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode);
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -87,7 +90,7 @@ export class CopilotProvider implements ILLMProvider {
             throw new Error('Error context is required for fixing tests');
         }
 
-        const systemPrompt = this.buildSystemPrompt();
+        const systemPrompt = PROMPTS.SYSTEM;
         const userPrompt = this.buildFixPrompt(context);
 
         return await this.sendRequest(systemPrompt, userPrompt);
@@ -214,131 +217,22 @@ export class CopilotProvider implements ILLMProvider {
     }
 
     /**
-     * Build the system prompt with SPFx-specific instructions
-     */
-    private buildSystemPrompt(): string {
-        return `You are an expert in SharePoint Framework (SPFx) development and testing.
-
-CRITICAL RULES:
-1. Use React Testing Library (@testing-library/react) for React 16+ components
-2. For SPFx-specific mocks, use the following patterns:
-   - Mock @microsoft/sp-page-context: jest.mock('@microsoft/sp-page-context')
-   - Mock @microsoft/sp-http: jest.mock('@microsoft/sp-http')
-   - Mock @microsoft/sp-core-library: jest.mock('@microsoft/sp-core-library')
-3. Always include proper type definitions with TypeScript
-4. Use jest.fn() for function mocks
-5. Use describe/it blocks for test structure
-6. Import statements must be at the top
-7. Mock external dependencies before imports
-8. Return ONLY the test code, no explanations or markdown unless wrapping code blocks
-
-JEST MOCK SYNTAX (CRITICAL):
-- DO NOT use TypeScript type annotations inside jest.mock() factory functions
-- WRONG: jest.mock('lib', () => ({ fn: (x: string) => {} }))
-- CORRECT: jest.mock('lib', () => ({ fn: (x) => {} }))
-- Use 'any' or remove types completely in mock implementations
-- Example for React components:
-  jest.mock('@fluentui/react', () => ({
-    PrimaryButton: (props: any) => <button onClick={props.onClick}>{props.text}</button>
-  }));
-
-BABEL COMPATIBILITY:
-- Remember: Jest uses Babel to transform TypeScript
-- Babel strips types but doesn't understand complex inline types in arrow functions
-- Keep mock implementations simple with minimal or no type annotations
-- Use 'any' type for props in mock components if needed
-
-RESPONSE FORMAT:
-- If you include markdown code blocks, use \`\`\`typescript or \`\`\`tsx
-- Ensure the code is complete and can be written directly to a .test.tsx file`;
-    }
-
-    /**
-     * Build the initial test generation prompt
-     */
-    private buildInitialPrompt(context: TestContext): string {
-        return `Generate comprehensive Jest unit tests for this SPFx component.
-
-**File:** ${context.fileName}
-
-**Source Code:**
-\`\`\`typescript
-${context.sourceCode}
-\`\`\`
-
-Generate a complete test file with:
-1. All necessary imports and mocks
-2. Tests for component rendering
-3. Tests for user interactions (if applicable)
-4. Tests for props variations
-5. Tests for error states (if applicable)
-
-Return the complete test file code.`;
-    }
-
-    /**
      * Build the fix prompt when test fails
      */
     private buildFixPrompt(context: TestContext): string {
         const errorContext = context.errorContext || '';
+        const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
         
         // Detect common error patterns
-        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token');
-        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft');
-        const isTypeError = errorContext.includes('expected ","') && errorContext.includes('props:');
-
+        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token') || errorContext.includes('Missing semicolon');
+        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft') || errorContext.includes('vscode');
+        
         let specificGuidance = '';
-        if (isSyntaxError && isMockError && isTypeError) {
-            specificGuidance = `
-**DETECTED ISSUE: TypeScript types in jest.mock() causing Babel syntax error**
-
-The error shows TypeScript type annotations inside a jest.mock() factory function.
-Babel cannot parse inline type annotations like \`(props: { text: string })\` in mock factories.
-
-**FIX REQUIRED:**
-Replace:
-  jest.mock('library', () => ({
-    Component: (props: { text: string; onClick: () => void }) => ...
-  }));
-
-With:
-  jest.mock('library', () => ({
-    Component: (props: any) => ...
-  }));
-
-OR remove the parameter type completely:
-  jest.mock('library', () => ({
-    Component: (props) => ...
-  }));
-`;
+        if (isSyntaxError && isMockError) {
+            specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
         }
 
-        return `The test you generated is failing. Please fix it.
-
-**Attempt:** ${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}
-
-**Source File:** ${context.fileName}
-
-**Test Error Output:**
-\`\`\`
-${errorContext}
-\`\`\`
-${specificGuidance}
-**Original Source Code:**
-\`\`\`typescript
-${context.sourceCode}
-\`\`\`
-
-Analyze the error and generate a CORRECTED version of the test file that will pass.
-Focus on:
-1. **CRITICAL**: Remove TypeScript type annotations from jest.mock() factory functions
-2. Use 'any' type or no type for parameters in mock implementations
-3. Fixing import errors
-4. Correcting mock implementations  
-5. Fixing assertion logic
-6. Handling async operations properly
-
-Return the complete FIXED test file code.`;
+        return PROMPTS.FIX_TEST(attemptStr, context.fileName, errorContext, specificGuidance, context.sourceCode);
     }
 
     /**
@@ -365,5 +259,60 @@ Return the complete FIXED test file code.`;
         return message.toLowerCase().includes('rate limit') ||
             message.includes('429') ||
             message.toLowerCase().includes('too many requests');
+    }
+
+    /**
+     * Detect missing dependencies based on package.json content
+     */
+    public async detectDependencies(packageJsonContent: any): Promise<Record<string, string>> {
+        this.logger.info('Analyzing dependencies via Copilot...');
+
+        const prompt = `Analyze this package.json and determine which Jest testing dependencies are missing or need to be installed.
+
+**Current package.json dependencies:**
+\`\`\`json
+${JSON.stringify({
+    dependencies: packageJsonContent.dependencies || {},
+    devDependencies: packageJsonContent.devDependencies || {}
+}, null, 2)}
+\`\`\`
+
+**Task:** 
+1. Analyze the EXISTING dependencies to determine what Jest packages are already installed
+2. Determine what ADDITIONAL packages (if any) are needed for a complete Jest + React Testing Library setup
+3. For any missing packages, recommend versions that are COMPATIBLE with the existing dependencies
+
+**Required packages for full Jest + React Testing Library:**
+- jest
+- @types/jest  
+- ts-jest
+- @testing-library/react
+- @testing-library/jest-dom
+- @testing-library/user-event
+- react-test-renderer
+- @types/react-test-renderer
+- identity-obj-proxy
+
+Return ONLY a JSON object mapping package names to their recommended version strings (e.g. {"jest": "^29.0.0"}). If everything is already installed, return an empty object {}. No markdown, no explanations outside the JSON block.`;
+
+        try {
+            const systemPrompt = "You are a dependency management assistant. You return only JSON.";
+            const response = await this.sendRequest(systemPrompt, prompt);
+            
+            // Try to parse JSON from the response
+            try {
+                // Remove potential markdown code blocks
+                const jsonStr = this.extractCodeFromMarkdown(response.code);
+                this.logger.debug('Parsing LLM dependency response', { jsonStr });
+                const versions = JSON.parse(jsonStr);
+                return versions;
+            } catch (parseError) {
+                this.logger.error('Failed to parse LLM dependency JSON', parseError);
+                return {};
+            }
+        } catch (error) {
+            this.logger.error('LLM dependency detection failed', error);
+            return {};
+        }
     }
 }

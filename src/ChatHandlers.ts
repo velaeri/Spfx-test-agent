@@ -303,25 +303,63 @@ export async function handleGenerateSingleRequest(
 export async function handleGenerateAllRequest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
-    stateService: StateService
+    stateService: StateService,
+    targetPath?: string
 ): Promise<vscode.ChatResult> {
     const batchStartTime = Date.now();
     telemetryService.trackCommandExecution('generate-all');
     
-    // Get all workspace folders
-    const workspaceFolders = vscode.workspace.workspaceFolders;
+    // Determine which folders to scan
+    let foldersToScan: vscode.WorkspaceFolder[] = [];
     
-    if (!workspaceFolders || workspaceFolders.length === 0) {
-        throw new WorkspaceNotFoundError();
+    if (targetPath) {
+        // User provided a specific path
+        const normalizedPath = path.resolve(targetPath);
+        
+        // Check if path is a workspace folder or inside one
+        const workspaceFolders = vscode.workspace.workspaceFolders || [];
+        const matchingFolder = workspaceFolders.find(folder => 
+            normalizedPath.startsWith(folder.uri.fsPath)
+        );
+        
+        if (matchingFolder) {
+            // If inside a workspace, use that workspace folder
+            foldersToScan = [matchingFolder];
+            logger.info(`Using workspace folder: ${matchingFolder.uri.fsPath}`);
+        } else if (fs.existsSync(normalizedPath)) {
+            // If it's a valid path outside workspaces, create a temporary workspace folder
+            const uri = vscode.Uri.file(normalizedPath);
+            foldersToScan = [{
+                uri: uri,
+                name: path.basename(normalizedPath),
+                index: 0
+            }];
+            logger.info(`Using specified path: ${normalizedPath}`);
+        } else {
+            stream.markdown(`❌ **Error:** La ruta especificada no existe: \`${targetPath}\`\n\n`);
+            return { metadata: { command: 'generate-all', error: 'Invalid path' } };
+        }
+    } else {
+        // No specific path - use all workspace folders
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        
+        if (!workspaceFolders || workspaceFolders.length === 0) {
+            throw new WorkspaceNotFoundError();
+        }
+        
+        foldersToScan = workspaceFolders;
     }
 
-    stream.markdown(`## 🚀 Generando Tests para Todo el Workspace\n\n`);
+    stream.markdown(`## 🚀 Generando Tests${targetPath ? ' para Proyecto Específico' : ' para Todo el Workspace'}\n\n`);
+    if (targetPath) {
+        stream.markdown(`📂 **Proyecto:** \`${targetPath}\`\n\n`);
+    }
     stream.progress('Escaneando archivos fuente...');
 
     let allFiles: vscode.Uri[] = [];
 
-    // Scan all workspace folders
-    for (const folder of workspaceFolders) {
+    // Scan target folders
+    for (const folder of foldersToScan) {
         const files = await FileScanner.findSourceFiles(folder);
         allFiles = allFiles.concat(files);
     }

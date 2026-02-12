@@ -1,40 +1,46 @@
 export const PROMPTS = {
-    SYSTEM: `You are an expert in SharePoint Framework (SPFx) development and testing.
+    SYSTEM: `You are an expert in TypeScript testing with Jest and ts-jest.
 
-CRITICAL RULES:
-1. Use React Testing Library (@testing-library/react) for React 16+ components
-2. For SPFx-specific mocks, use the following patterns:
-   - Mock @microsoft/sp-page-context: jest.mock('@microsoft/sp-page-context')
-   - Mock @microsoft/sp-http: jest.mock('@microsoft/sp-http')
-   - Mock @microsoft/sp-core-library: jest.mock('@microsoft/sp-core-library')
-3. Always include proper type definitions with TypeScript
-4. Use jest.fn() for function mocks
-5. Use describe/it blocks for test structure
-6. Import statements must be at the top
-7. Mock external dependencies before imports
-8. Return ONLY the test code, no explanations or markdown unless wrapping code blocks
+CRITICAL RULES FOR BABEL/TS-JEST COMPATIBILITY:
+1. NEVER use type annotations inside jest.mock() factory functions
+2. NEVER use type annotations in variable declarations inside jest.mock()
+3. Use 'any' type or NO types for all variables and parameters in mocks
+4. Keep mock implementations extremely simple
 
-JEST MOCK SYNTAX (CRITICAL):
-- DO NOT use TypeScript type annotations inside jest.mock() factory functions
-- WRONG: jest.mock('lib', () => ({ fn: (x: string) => {} }))
-- CORRECT: jest.mock('lib', () => ({ fn: (x) => {} }))
-- Use 'any' or remove types completely in mock implementations
-- Example for React components:
-  jest.mock('@fluentui/react', () => ({
-    PrimaryButton: (props: any) => <button onClick={props.onClick}>{props.text}</button>
-  }));
+WRONG EXAMPLES (WILL CAUSE "Missing semicolon" ERROR):
+❌ jest.mock('vscode', () => ({ window: { showInformationMessage: (msg: string) => Promise.resolve() } }))
+❌ let mockContext: vscode.ExtensionContext;
+❌ const mockLogger: jest.Mocked<Logger> = { info: jest.fn() };
 
-BABEL COMPATIBILITY:
-- Remember: Jest uses Babel to transform TypeScript
-- Babel strips types but doesn't understand complex inline types in arrow functions
-- Keep mock implementations simple with minimal or no type annotations
-- Use 'any' type for props in mock components if needed
+CORRECT EXAMPLES:
+✅ jest.mock('vscode', () => ({ window: { showInformationMessage: (msg) => Promise.resolve() } }))
+✅ let mockContext: any;
+✅ const mockLogger: any = { info: jest.fn() };
+
+VARIABLE DECLARATIONS:
+- Use 'any' type for ALL test variables
+- WRONG: let service: MyService;
+- CORRECT: let service: any;
+
+JEST MOCKING PATTERNS:
+- Use jest.fn() for function mocks
+- Keep factory functions simple and type-free
+- For React components, use props: any
+- Example: jest.mock('@fluentui/react', () => ({ Button: (props) => null }))
+
+TEST STRUCTURE:
+1. Imports at top (jest.mock calls BEFORE imports)
+2. describe blocks
+3. beforeEach/afterEach for setup/teardown
+4. it/test blocks for assertions
+5. Use expect() for assertions
 
 RESPONSE FORMAT:
-- If you include markdown code blocks, use \`\`\`typescript or \`\`\`tsx
-- Ensure the code is complete and can be written directly to a .test.tsx file`,
+- Return ONLY executable test code
+- Use \`\`\`typescript code blocks if wrapping
+- No explanations, just working code`,
 
-    GENERATE_TEST: (fileName: string, sourceCode: string) => `Generate comprehensive Jest unit tests for this SPFx component.
+    GENERATE_TEST: (fileName: string, sourceCode: string) => `Generate comprehensive Jest unit tests for this file.
 
 **File:** ${fileName}
 
@@ -43,62 +49,61 @@ RESPONSE FORMAT:
 ${sourceCode}
 \`\`\`
 
-Generate a complete test file with:
-1. All necessary imports and mocks
-2. Tests for component rendering
-3. Tests for user interactions (if applicable)
-4. Tests for props variations
-5. Tests for error states (if applicable)
+IMPORTANT REQUIREMENTS:
+1. Use 'any' type for ALL variable declarations (let service: any;)
+2. NO type annotations in jest.mock() factory functions
+3. Use jest.fn() for all function mocks
+4. Keep mocks simple and type-free
+5. Mock external dependencies with jest.mock() BEFORE imports
 
-Return the complete test file code.`,
+Generate a complete test file that will work with ts-jest WITHOUT Babel syntax errors.
 
-    FIX_TEST: (attemptStr: string, fileName: string, errorContext: string, specificGuidance: string, sourceCode: string) => `The test you generated is failing. Please fix it.
+Return ONLY the complete test file code - no explanations.`,
+
+    FIX_TEST: (attemptStr: string, fileName: string, errorContext: string, specificGuidance: string, sourceCode: string) => `The test is failing. Fix it now.
 
 **Attempt:** ${attemptStr}
 
 **Source File:** ${fileName}
 
-**Test Error Output:**
+**Error:**
 \`\`\`
 ${errorContext}
 \`\`\`
 ${specificGuidance}
-**Original Source Code:**
+**Source Code:**
 \`\`\`typescript
 ${sourceCode}
 \`\`\`
 
-Analyze the error and generate a CORRECTED version of the test file that will pass.
-Focus on:
-1. **CRITICAL**: Remove TypeScript type annotations from jest.mock() factory functions
-2. Use 'any' type or no type for parameters in mock implementations
-3. Fixing import errors
-4. Correcting mock implementations  
-5. Fixing assertion logic
-6. Handling async operations properly
+CRITICAL FIX STEPS:
+1. Replace ALL typed variable declarations with 'any' type
+   - Change: let service: MyService; 
+   - To: let service: any;
+2. Remove ALL type annotations from jest.mock() functions
+3. Use jest.fn() for all mocks
+4. Keep everything simple and type-free
 
-Return the complete FIXED test file code.`,
+Return the COMPLETE FIXED test file code - no explanations.`,
 
     FIX_SPECIFIC_GUIDANCE_MOCK_TYPES: `
-**DETECTED ISSUE: TypeScript types in jest.mock() causing Babel syntax error**
+**CRITICAL ERROR DETECTED: Babel syntax error from TypeScript types**
 
-The error shows TypeScript type annotations inside a jest.mock() factory function.
-Babel cannot parse inline type annotations like \`(props: { text: string })\` in mock factories.
+THE PROBLEM:
+- "Missing semicolon" or "Unexpected token" errors mean TypeScript types where they shouldn't be
+- Common cause: Type annotations in variable declarations or jest.mock() functions
 
-**FIX REQUIRED:**
-Replace:
-  jest.mock('library', () => ({
-    Component: (props: { text: string; onClick: () => void }) => ...
-  }));
+THE FIX:
+1. Change ALL variable declarations to use 'any' type:
+   - ❌ WRONG: let mockContext: vscode.ExtensionContext;
+   - ✅ CORRECT: let mockContext: any;
+   
+2. Remove ALL types from jest.mock():
+   - ❌ WRONG: jest.mock('lib', () => ({ fn: (x: string) => {} }))
+   - ✅ CORRECT: jest.mock('lib', () => ({ fn: (x) => {} }))
 
-With:
-  jest.mock('library', () => ({
-    Component: (props: any) => ...
-  }));
+3. Use only 'any' or no types in test variables
 
-OR remove the parameter type completely:
-  jest.mock('library', () => ({
-    Component: (props) => ...
-  }));
-`
+DO THIS NOW - replace every typed declaration with 'any' type.
+`,
 };

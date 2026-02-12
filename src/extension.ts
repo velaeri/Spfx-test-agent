@@ -120,13 +120,16 @@ async function handleChatRequest(
     }
 
     try {
+        // Extract target path from prompt if provided
+        const targetPath = extractPathFromPrompt(request.prompt);
+        
         // Check command type
         if (request.command === 'setup') {
             return await handleSetupRequest(stream, token);
         }
         
         if (request.command === 'generate-all') {
-            return await handleGenerateAllRequest(stream, token, stateService);
+            return await handleGenerateAllRequest(stream, token, stateService, targetPath);
         }
 
         // Original single-file generation
@@ -135,6 +138,34 @@ async function handleChatRequest(
     } catch (error) {
         return handleError(error, stream);
     }
+}
+
+/**
+ * Extract file/folder path from chat prompt
+ * Supports: C:\path\to\folder, /path/to/folder, relative paths
+ */
+function extractPathFromPrompt(prompt: string): string | undefined {
+    if (!prompt) return undefined;
+    
+    // Match Windows paths: C:\path or C:/path
+    const windowsPath = prompt.match(/[A-Za-z]:[\\\/](?:[^\s"'<>|*?]+[\\\/]?)+/);
+    if (windowsPath) {
+        return windowsPath[0];
+    }
+    
+    // Match Unix absolute paths: /path/to/folder
+    const unixPath = prompt.match(/\/(?:[^\s"'<>|*?]+\/?)*/);
+    if (unixPath && unixPath[0].length > 1) {
+        return unixPath[0];
+    }
+    
+    // Match relative paths if they look like paths (contain / or \)
+    const relativePath = prompt.match(/(?:[.\w-]+[\\\/])+[.\w-]*/);
+    if (relativePath) {
+        return relativePath[0];
+    }
+    
+    return undefined;
 }
 
 

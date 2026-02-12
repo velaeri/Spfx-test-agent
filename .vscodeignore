@@ -20,3 +20,20 @@ QUICKSTART.md
 RELEASE_*.md
 SETUP_FEATURE.md
 USAGE.md
+
+# Documentation (exclude from package)
+CHANGELOG-FIX.md
+COMPILE-GUIDE.md
+IMPLEMENTATION-V0.5.0.md
+PHASE-4-5-6-PROGRESS.md
+EXECUTIVE-SUMMARY.md
+TESTING-GUIDE.md
+
+# Test and development files
+reproduce_issue.js
+test-setup-check.js
+verify_fix.js
+install_dep.js
+test-extension.ps1
+jest.config.js
+tsconfig.test.json

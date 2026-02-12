@@ -93,6 +93,14 @@ export class ConfigService {
     }
 
     /**
+     * Static method for backward compatibility
+     * Gets config through singleton instance
+     */
+    public static getConfig(): ExtensionConfig {
+        return ConfigService.getInstance().getConfig();
+    }
+
+    /**
      * Get a specific configuration value
      */
     public static get<T>(key: keyof ExtensionConfig, defaultValue: T): T {

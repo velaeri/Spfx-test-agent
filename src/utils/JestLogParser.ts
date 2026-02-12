@@ -82,6 +82,8 @@ export class JestLogParser {
                     line.trim().startsWith('Expected') ||
                     line.trim().startsWith('Received') ||
                     line.includes('Error:') ||
+                    line.includes('SyntaxError') ||
+                    line.includes('TypeError') ||
                     line.includes('at ') || // Stack trace (after filtering above)
                     line.includes('FAIL') ||
                     /^\s+\d+\s*\|/.test(line)) { // Code snippet lines

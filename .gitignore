@@ -4,3 +4,24 @@ dist/
 *.vsix
 .vscode-test/
 .DS_Store
+*.log
+*.map
+
+# Archive folder for development docs
+.archive/
+
+# Test files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+
+# Test and development files
+reproduce_issue.js
+test-setup-check.js
+verify_fix.js
+install_dep.js
+test-extension.ps1
+cleanup_repo.bat
+clean_directory.bat
+fix_and_compile.bat

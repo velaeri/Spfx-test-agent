@@ -2,7 +2,7 @@
   "name": "spfx-test-agent",
   "displayName": "SPFX Test Agent",
   "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
-  "version": "0.4.11",
+  "version": "0.4.22",
   "publisher": "velaeri",
   "repository": {
     "type": "git",

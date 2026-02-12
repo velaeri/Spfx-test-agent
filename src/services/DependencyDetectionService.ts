@@ -122,22 +122,7 @@ export class DependencyDetectionService {
      * Get compatible dependencies based on LLM analysis or fallback to heuristics
      */
     async getCompatibleDependencies(projectRoot: string): Promise<Record<string, string>> {
-        // Try LLM first (intelligent detection)
-        this.logger.info('🧠 Using LLM to analyze project and identify missing dependencies...');
-        try {
-            const llmVersions = await this.getCompatibleVersionsFromLLM(projectRoot);
-            if (llmVersions !== null) {
-                this.logger.info('✅ LLM analysis completed', {
-                    missingCount: Object.keys(llmVersions).length,
-                    packages: Object.keys(llmVersions)
-                });
-                return llmVersions;
-            }
-        } catch (error) {
-            this.logger.warn('❌ LLM analysis threw error, falling back to heuristics', error);
-        }
-        // Fallback: Use heuristic detection and filter by what's already installed
-        this.logger.info('⚠️ LLM unavailable, using heuristic detection with installed package filtering...');
+        // Get currently installed dependencies
         const packageJsonPath = path.join(projectRoot, 'package.json');
         let installedDeps: Record<string, string> = {};
         if (fs.existsSync(packageJsonPath)) {
@@ -147,8 +132,9 @@ export class DependencyDetectionService {
                 ...packageJson.devDependencies || {}
             };
         }
+
+        // Determine which Jest version template to use
         const existingJest = this.getExistingJestVersion(projectRoot);
-        // Choose base template
         let baseDeps = JEST_DEPENDENCIES;
         if (existingJest && existingJest.major === 28) {
             this.logger.info('Detected Jest 28.x, using compatible versions');
@@ -156,18 +142,52 @@ export class DependencyDetectionService {
         } else {
             this.logger.info('Using Jest 29.x versions (default)');
         }
-        // Filter out packages that are already installed
+
+        // CRITICAL: Always verify essential dependencies are installed
+        // ts-jest is REQUIRED for TypeScript projects, otherwise Babel will be used
+        const essentialDeps = ['ts-jest', '@types/jest'];
         const missingDeps: Record<string, string> = {};
-        for (const [pkg, version] of Object.entries(baseDeps)) {
+        
+        for (const pkg of essentialDeps) {
             if (!installedDeps[pkg]) {
+                this.logger.warn(`CRITICAL: ${pkg} is missing - TypeScript tests will fail without it`);
+                missingDeps[pkg] = baseDeps[pkg as keyof typeof baseDeps] || JEST_DEPENDENCIES[pkg as keyof typeof JEST_DEPENDENCIES];
+            }
+        }
+
+        // Try LLM for other dependencies (non-essential)
+        this.logger.info('🧠 Using LLM to analyze project and identify missing dependencies...');
+        try {
+            const llmVersions = await this.getCompatibleVersionsFromLLM(projectRoot);
+            if (llmVersions !== null && Object.keys(llmVersions).length > 0) {
+                this.logger.info('✅ LLM analysis completed', {
+                    missingCount: Object.keys(llmVersions).length,
+                    packages: Object.keys(llmVersions)
+                });
+                // Merge with essential deps (essential deps take priority)
+                return { ...llmVersions, ...missingDeps };
+            }
+        } catch (error) {
+            this.logger.warn('❌ LLM analysis threw error, falling back to heuristics', error);
+        }
+
+        // Fallback: Use heuristic detection and filter by what's already installed
+        this.logger.info('⚠️ LLM unavailable or returned empty, using heuristic detection...');
+        
+        // Check all base dependencies
+        for (const [pkg, version] of Object.entries(baseDeps)) {
+            if (!installedDeps[pkg] && !missingDeps[pkg]) {
                 missingDeps[pkg] = version;
             }
         }
+        
         this.logger.info('Heuristic analysis complete', {
             total: Object.keys(baseDeps).length,
             installed: Object.keys(baseDeps).length - Object.keys(missingDeps).length,
-            missing: Object.keys(missingDeps).length
+            missing: Object.keys(missingDeps).length,
+            missingPackages: Object.keys(missingDeps)
         });
+        
         return missingDeps;
     }
 }

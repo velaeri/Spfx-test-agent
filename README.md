@@ -27,13 +27,18 @@ Extensión de Visual Studio Code que implementa un **workflow agéntico autónom
 - **🧠 Powered by AI**: Usa GitHub Copilot para generación inteligente de código
 - **🎯 Optimizado para SPFx**: Conocimiento built-in de patrones SharePoint Framework
 
+### Características v0.5.0 (Actual)
+- **🛑 Setup Estricto**: `/generate-all` ahora bloquea ejecución si el entorno no es válido
+- **📦 Instalación Inteligente**: `/setup` detecta versiones compatibles y las instala automáticamente
+- **🔍 Verificación Post-Setup**: `/setup` verifica que `ts-jest` esté realmente instalado
+- **🌍 Fixes de TypeScript**: Manejo robusto de `ts-jest` para evitar errores "Missing semicolon"
+- **🛑 Protección contra Babel**: Configuración forzada de `ts-jest` para evitar parsers incorrectos
+
 ### Características v0.3.0
 - **🌍 Interfaz en Castellano**: Mensajes, errores y ayudas en español
 - **🎯 Modelo Dinámico**: Usa el modelo que tengas seleccionado en Copilot
 - **📦 Auto-Setup**: Detecta dependencias faltantes y las instala automáticamente
 - **🔧 Configuración Inteligente**: Crea jest.config.js óptimo para SPFx
-- **📋 Comandos Manuales**: Setup de Jest via Command Palette
-- **🔍 Generación Masiva**: Genera tests para todo el workspace con `@spfx-tester generate-all`
 
 ### Características Técnicas
 - **🧹 Parsing Inteligente**: Limpia output de Jest reduciendo ruido

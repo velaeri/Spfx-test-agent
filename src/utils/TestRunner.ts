@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { Logger } from '../services/Logger';
 import { DependencyDetectionService } from '../services/DependencyDetectionService';
 import { JestConfigurationService } from '../services/JestConfigurationService';
+import { PackageInstallationService } from '../services/PackageInstallationService';
 import { SecurityError, TestExecutionError } from '../errors/CustomErrors';
 import { FileScanner } from './FileScanner';
 
@@ -33,11 +34,19 @@ export class TestRunner {
     }
 
     /**
-     * Runs Jest on a specific test file
+     * Runs Jest on a specific test file.
+     * 
+     * CRITICAL: This method now guarantees that ts-jest is used for
+     * TypeScript transformation.  Before spawning Jest it will:
+     *  1. Locate the project root (closest package.json).
+     *  2. Validate / create a jest.config.js that includes ts-jest.
+     *  3. If ts-jest is not even installed in node_modules, fall back
+     *     to an inline --config with the ts-jest transform so that
+     *     TypeScript files are never parsed as plain JavaScript.
      * 
      * @param testFilePath - Absolute path to the test file
-     * @param workspaceRoot - Root directory of the workspace (where package.json is)
-     * @param jestCommand - Command to run Jest (e.g., 'npx jest', 'yarn jest')
+     * @param workspaceRoot - Root directory of the workspace
+     * @param jestCommand - Base jest command (default: 'npx jest')
      * @returns Promise with test results
      */
     async runTest(
@@ -67,32 +76,69 @@ export class TestRunner {
             workspaceRoot: normalizedWorkspaceRoot
         });
 
-        // Check if jest.config exists
-        const hasJestConfig = this.configService.hasJestConfig(projectRoot);
-        this.logger.debug('Jest config check', { 
+        // ────────── ENSURE TS-JEST IS INSTALLED ──────────
+        // Without ts-jest in node_modules, Jest silently falls back to
+        // babel-jest which CANNOT parse TypeScript syntax.
+        if (!this.configService.isTsJestInstalled(projectRoot)) {
+            this.logger.warn('ts-jest NOT found in node_modules — auto-installing...');
+            const pkgService = new PackageInstallationService();
+            // Detect Jest major version to pick compatible ts-jest
+            const depService = new DependencyDetectionService();
+            const jestVer = depService.getExistingJestVersion(projectRoot);
+            const tsJestVer = (jestVer && jestVer.major === 28) ? '^28.0.8' : '^29.1.1';
+            const typesVer = (jestVer && jestVer.major === 28) ? '^28.1.0' : '^29.5.11';
+            await pkgService.installPackages(projectRoot, [
+                `ts-jest@${tsJestVer}`,
+                `@types/jest@${typesVer}`,
+                'identity-obj-proxy@^3.0.0'
+            ]);
+
+            if (!this.configService.isTsJestInstalled(projectRoot)) {
+                this.logger.error('ts-jest installation failed — tests will likely fail with Babel errors');
+            } else {
+                this.logger.info('ts-jest auto-installed successfully');
+            }
+        }
+
+        // ────────── ENSURE TS-JEST CONFIG ──────────
+        // Guarantee a valid ts-jest configuration exists before we ever spawn Jest.
+        await this.configService.ensureValidJestConfig(projectRoot);
+
+        const hasValidConfig = this.configService.hasJestConfig(projectRoot) 
+                            && this.configService.validateExistingConfig(projectRoot);
+
+        this.logger.debug('Jest config validation', { 
             projectRoot, 
-            hasJestConfig 
+            hasValidConfig,
+            tsJestInstalled: this.configService.isTsJestInstalled(projectRoot)
         });
 
-        // Parse jest command (support for 'npx jest', 'yarn jest', etc.)
+        // Always use 'npx jest' to invoke jest directly (never 'npm test'
+        // which could be 'gulp test' in SPFx projects)
         const commandParts = jestCommand.split(' ');
         const command = commandParts[0];
         const baseArgs = commandParts.slice(1);
 
         // Build arguments array (safer than string concatenation)
+        // CRITICAL: Use --testPathPattern with forward slashes for Windows compatibility.
+        // Jest interprets the positional file argument as a regex, and Windows backslashes
+        // break the regex matching, causing Jest to run ALL test files instead of just one.
+        const testPathPattern = normalizedTestPath.replace(/\\/g, '/');
         const args = [
             ...baseArgs,
-            normalizedTestPath,
+            '--testPathPattern',
+            testPathPattern,
             '--no-coverage',
             '--verbose',
             '--colors'
         ];
 
-        // If no jest.config, add passWithNoTests to avoid errors
-        if (!hasJestConfig) {
-            args.push('--passWithNoTests');
-            args.push('--testEnvironment=node');
-            this.logger.info('No Jest config found, using default configuration');
+        // If we STILL don't have a valid config on disk (edge case),
+        // pass an inline config so ts-jest is guaranteed.
+        if (!hasValidConfig) {
+            const inlineArgs = this.configService.getInlineConfigArgs();
+            args.push(...inlineArgs);
+            this.logger.warn('Using inline ts-jest config as fallback');
         }
 
         this.logger.info(`Running Jest: ${command} ${args.join(' ')}`, {
@@ -165,5 +211,27 @@ export class TestRunner {
         this.logger.debug(`Checking Jest availability in: ${workspaceRoot}`);
         // Use unified detection logic
         return this.dependencyService.checkJestAvailability(workspaceRoot);
+    }
+
+    /**
+     * Check if ts-jest is installed AND the jest config references it.
+     * Used by callers that want to pre-validate before triggering a test run.
+     */
+    isEnvironmentReady(workspaceRoot: string): { ready: boolean; reason?: string } {
+        const projectRoot = FileScanner.findProjectRoot(workspaceRoot) || workspaceRoot;
+
+        if (!this.configService.isTsJestInstalled(projectRoot)) {
+            return { ready: false, reason: 'ts-jest is not installed in node_modules' };
+        }
+
+        if (!this.configService.hasJestConfig(projectRoot)) {
+            return { ready: false, reason: 'No jest.config.* file found' };
+        }
+
+        if (!this.configService.validateExistingConfig(projectRoot)) {
+            return { ready: false, reason: 'jest.config exists but does not reference ts-jest' };
+        }
+
+        return { ready: true };
     }
 }

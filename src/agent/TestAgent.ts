@@ -10,6 +10,9 @@ import { Logger } from '../services/Logger';
 import { ConfigService } from '../services/ConfigService';
 import { StateService, TestGenerationHistory } from '../services/StateService';
 import { ProjectSetupService } from '../services/ProjectSetupService';
+import { JestConfigurationService } from '../services/JestConfigurationService';
+import { PackageInstallationService } from '../services/PackageInstallationService';
+import { DependencyDetectionService } from '../services/DependencyDetectionService';
 import { TelemetryService } from '../services/TelemetryService';
 import { 
     JestNotFoundError, 
@@ -33,12 +36,18 @@ export class TestAgent {
     private logger: Logger;
     private stateService?: StateService;
     private setupService: ProjectSetupService;
+    private configService: JestConfigurationService;
+    private packageService: PackageInstallationService;
+    private dependencyService: DependencyDetectionService;
     private telemetryService: TelemetryService;
 
     constructor(llmProvider?: ILLMProvider, stateService?: StateService) {
         this.testRunner = new TestRunner();
         this.logger = Logger.getInstance();
         this.setupService = new ProjectSetupService();
+        this.configService = new JestConfigurationService();
+        this.packageService = new PackageInstallationService();
+        this.dependencyService = new DependencyDetectionService();
         this.telemetryService = TelemetryService.getInstance();
         
         // Use provided LLM provider or create default Copilot provider
@@ -111,6 +120,56 @@ export class TestAgent {
             throw new JestNotFoundError(workspaceRoot);
         }
 
+        // ── CRITICAL: Ensure ts-jest is INSTALLED before anything else ──
+        // Without ts-jest in node_modules, Jest falls back to babel-jest
+        // which cannot parse TypeScript and causes "Missing semicolon" errors.
+        if (!this.configService.isTsJestInstalled(workspaceRoot)) {
+            stream.markdown(`📦 **ts-jest no está instalado.** Instalando automáticamente...\n\n`);
+            stream.progress('Instalando ts-jest y dependencias...');
+
+            // Determine compatible versions based on existing Jest version
+            const existingJest = this.dependencyService.getExistingJestVersion(workspaceRoot);
+            let tsJestVersion = '^29.1.1';
+            let typesJestVersion = '^29.5.11';
+            let identityObjVersion = '^3.0.0';
+            if (existingJest && existingJest.major === 28) {
+                tsJestVersion = '^28.0.8';
+                typesJestVersion = '^28.1.0';
+            }
+
+            const packagesToInstall = [
+                `ts-jest@${tsJestVersion}`,
+                `@types/jest@${typesJestVersion}`,
+                `identity-obj-proxy@${identityObjVersion}`
+            ];
+
+            const installSuccess = await this.packageService.installPackages(workspaceRoot, packagesToInstall);
+            if (installSuccess) {
+                stream.markdown(`✅ Dependencias instaladas: ${packagesToInstall.join(', ')}\n\n`);
+            } else {
+                stream.markdown(`❌ **Error al instalar ts-jest.** Ejecuta manualmente:\n\n`);
+                stream.markdown(`\`\`\`bash\nnpm install --save-dev --legacy-peer-deps ${packagesToInstall.join(' ')}\n\`\`\`\n\n`);
+                throw new TestGenerationError(
+                    'Cannot run TypeScript tests without ts-jest installed',
+                    0, 0, 'ts-jest installation failed'
+                );
+            }
+        }
+
+        // ── Ensure jest.config.js uses ts-jest ──
+        const configCreated = await this.configService.ensureValidJestConfig(workspaceRoot);
+        if (configCreated) {
+            stream.markdown(`🔧 Creada/actualizada \`jest.config.js\` con ts-jest\n\n`);
+        }
+        // Ensure setup files and mocks exist
+        const jestSetupPath = path.join(workspaceRoot, 'jest.setup.js');
+        if (!fs.existsSync(jestSetupPath)) {
+            await this.configService.createJestSetup(workspaceRoot);
+        }
+        await this.configService.createMockDirectory(workspaceRoot);
+        // Ensure package.json scripts point to jest (not gulp)
+        await this.configService.updatePackageJsonScripts(workspaceRoot);
+
         // Read the source file
         const sourceCode = fs.readFileSync(sourceFilePath, 'utf-8');
         const sourceFileName = path.basename(sourceFilePath);
@@ -135,8 +194,8 @@ export class TestAgent {
             maxAttempts: config.maxHealingAttempts
         });
 
-        fs.writeFileSync(testFilePath, result.code, 'utf-8');
-        this.logger.info('Initial test file generated', { model: result.model, mode });
+        fs.writeFileSync(testFilePath, this.sanitizeTestCode(result.code), 'utf-8');
+        this.logger.info('Initial test file generated (sanitized)', { model: result.model, mode });
 
         stream.markdown(`✅ Generated test file: \`${path.relative(workspaceRoot, testFilePath)}\`\n\n`);
         
@@ -188,8 +247,8 @@ export class TestAgent {
                     maxAttempts: config.maxHealingAttempts
                 });
 
-                fs.writeFileSync(testFilePath, result.code, 'utf-8');
-                this.logger.info(`Test file updated (attempt ${attempt})`, { model: result.model });
+                fs.writeFileSync(testFilePath, this.sanitizeTestCode(result.code), 'utf-8');
+                this.logger.info(`Test file updated (attempt ${attempt}, sanitized)`, { model: result.model });
 
                 stream.markdown(`🔄 Updated test file (attempt ${attempt})\n\n`);
                 stream.progress('Running test again...');
@@ -325,5 +384,65 @@ export class TestAgent {
      */
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Sanitize generated test code to fix common Babel/TypeScript issues
+     * This is a POST-PROCESSING step because LLMs often ignore prompt instructions
+     */
+    private sanitizeTestCode(code: string): string {
+        let sanitized = code;
+        
+        // 1. Replace typed variable declarations with 'any'
+        // Matches: let/const/var name: SomeType (not followed by =)
+        // e.g., "let mockService: jest.Mocked<Service>;" -> "let mockService: any;"
+        sanitized = sanitized.replace(
+            /\b(let|const|var)\s+(\w+)\s*:\s*(?!any\b)([A-Z][A-Za-z0-9<>\[\],.\s|&]+?)(?=\s*[;=])/g,
+            '$1 $2: any'
+        );
+        
+        // 2. Remove type annotations from arrow function parameters in jest.mock
+        // Matches: (props: SomeType) => -> (props) =>
+        sanitized = sanitized.replace(
+            /\(\s*(\w+)\s*:\s*[^)]+\)\s*=>/g,
+            '($1) =>'
+        );
+        
+        // 3. Remove type parameters from jest.Mocked<Type>
+        // Matches: jest.Mocked<SomeType> -> any
+        sanitized = sanitized.replace(
+            /jest\.Mocked<[^>]+>/g,
+            'any'
+        );
+        
+        // 4. Remove complex generic types in declarations
+        // Matches: : Type<Generic, Multiple> -> : any
+        sanitized = sanitized.replace(
+            /:\s*[A-Z]\w*<[^>]+>/g,
+            ': any'
+        );
+        
+        // 5. Fix class declarations with typed properties inside jest.mock
+        // Remove type annotations from class method parameters
+        sanitized = sanitized.replace(
+            /class\s*\{([^}]*)\}/g,
+            (match) => {
+                return match.replace(/(\w+)\s*:\s*[A-Za-z<>\[\]]+/g, '$1');
+            }
+        );
+        
+        // 6. Remove as Type assertions that might cause issues
+        sanitized = sanitized.replace(
+            /\s+as\s+[A-Z][A-Za-z0-9<>\[\],\s]+(?=[;\),\]])/g,
+            ''
+        );
+        
+        this.logger.debug('Sanitized test code', { 
+            originalLength: code.length, 
+            sanitizedLength: sanitized.length,
+            changed: code !== sanitized
+        });
+        
+        return sanitized;
     }
 }

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { Logger, LogLevel } from './services/Logger';
 import { ConfigService } from './services/ConfigService';
 import { StateService } from './services/StateService';
@@ -110,8 +111,20 @@ async function handleChatRequest(
     
     logger.info('Chat request received', { 
         prompt: request.prompt,
-        command: request.command
+        command: request.command,
+        referencesCount: request.references?.length || 0
     });
+    
+    // Log references for debugging
+    if (request.references && request.references.length > 0) {
+        request.references.forEach((ref, idx) => {
+            logger.info(`Reference ${idx}:`, {
+                type: typeof ref.value,
+                isUri: ref.value instanceof vscode.Uri,
+                value: ref.value instanceof vscode.Uri ? ref.value.fsPath : String(ref.value)
+            });
+        });
+    }
 
     // Check if the request was cancelled
     if (token.isCancellationRequested) {
@@ -120,8 +133,14 @@ async function handleChatRequest(
     }
 
     try {
-        // Extract target path from prompt if provided
-        const targetPath = extractPathFromPrompt(request.prompt);
+        // 1. Identify target path (priority: references > prompt)
+        let targetPath = extractPathFromReferences(request.references);
+        
+        if (!targetPath) {
+            targetPath = extractPathFromPrompt(request.prompt);
+        }
+
+        logger.info('Identified target path', { targetPath });
         
         // Check command type
         if (request.command === 'setup') {
@@ -141,16 +160,46 @@ async function handleChatRequest(
 }
 
 /**
+ * Extract path from chat references (attached files/folders)
+ */
+function extractPathFromReferences(references: readonly vscode.ChatPromptReference[]): string | undefined {
+    if (!references || references.length === 0) return undefined;
+    
+    // Look for the first URI reference (file or folder)
+    for (const ref of references) {
+        if (ref.value instanceof vscode.Uri) {
+            return ref.value.fsPath;
+        }
+    }
+    
+    return undefined;
+}
+
+/**
  * Extract file/folder path from chat prompt
- * Supports: C:\path\to\folder, /path/to/folder, relative paths
+ * Supports: C:\path\to\folder, /path/to/folder, relative paths, quoted paths
  */
 function extractPathFromPrompt(prompt: string): string | undefined {
     if (!prompt) return undefined;
+
+    // First try to match quoted paths (handles spaces)
+    const quotedPath = prompt.match(/"([^"]+)"|'([^']+)'/);
+    if (quotedPath) {
+        return quotedPath[1] || quotedPath[2];
+    }
     
-    // Match Windows paths: C:\path or C:/path
-    const windowsPath = prompt.match(/[A-Za-z]:[\\\/](?:[^\s"'<>|*?]+[\\\/]?)+/);
+    // Match Windows paths (handles some spaces if not too complex, but stops at common breaks if not quoted)
+    // Improved regex to try to capture paths with spaces if they look like a Windows path until the end or a newline
+    const windowsPath = prompt.match(/[A-Za-z]:[\\\/](?:[^"<>|*?]+)/);
     if (windowsPath) {
-        return windowsPath[0];
+        let p = windowsPath[0].trim();
+        // If it starts looking like a path, try to validate it exists
+        if (fs.existsSync(p)) return p;
+        
+        // If not, it might have captured too much (e.g. part of the sentence)
+        // Let's try the original restricted regex for fallback
+        const strictWindowsPath = prompt.match(/[A-Za-z]:[\\\/](?:[^\s"'<>|*?]+[\\\/]?)+/);
+        if (strictWindowsPath) return strictWindowsPath[0];
     }
     
     // Match Unix absolute paths: /path/to/folder

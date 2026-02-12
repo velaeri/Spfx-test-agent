@@ -46,6 +46,10 @@ export class JestLogParser {
                 line.includes('Error:') || 
                 line.includes('Expected') || 
                 line.includes('Received') ||
+                line.includes('SyntaxError') ||
+                line.includes('TypeError') ||
+                line.includes('Unexpected token') ||
+                line.includes('Missing semicolon') ||
                 line.includes('●')
             );
             

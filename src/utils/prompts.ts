@@ -28,12 +28,10 @@ JEST MOCKING PATTERNS:
 - For React components, use props: any
 - Example: jest.mock('@fluentui/react', () => ({ Button: (props) => null }))
 
-TEST STRUCTURE:
-1. Imports at top (jest.mock calls BEFORE imports)
-2. describe blocks
-3. beforeEach/afterEach for setup/teardown
-4. it/test blocks for assertions
-5. Use expect() for assertions
+Common Fixes for "import statement outside a module":
+- Ensure all imports are at the top
+- If mocking a module that causes this, try using jest.mock() with a factory that returns a simple object
+- Ensure you are not importing ESM-only packages in a non-ESM environment
 
 RESPONSE FORMAT:
 - Return ONLY executable test code

@@ -9,12 +9,12 @@ export class FileScanner {
     /**
      * Find all TypeScript/TSX files in the workspace (excluding test files)
      * 
-     * @param workspaceFolder - Workspace folder to scan
+     * @param base - Workspace folder or URI to scan
      * @param exclude - Additional patterns to exclude
      * @returns Array of file URIs
      */
     public static async findSourceFiles(
-        workspaceFolder: vscode.WorkspaceFolder,
+        base: vscode.WorkspaceFolder | vscode.Uri,
         exclude: string[] = []
     ): Promise<vscode.Uri[]> {
         // Default exclusions
@@ -35,13 +35,13 @@ export class FileScanner {
 
         // Search for .ts and .tsx files
         const tsFiles = await vscode.workspace.findFiles(
-            new vscode.RelativePattern(workspaceFolder, '**/*.ts'),
+            new vscode.RelativePattern(base, '**/*.ts'),
             `{${allExclusions.join(',')}}`,
             1000 // Max 1000 files
         );
 
         const tsxFiles = await vscode.workspace.findFiles(
-            new vscode.RelativePattern(workspaceFolder, '**/*.tsx'),
+            new vscode.RelativePattern(base, '**/*.tsx'),
             `{${allExclusions.join(',')}}`,
             1000
         );

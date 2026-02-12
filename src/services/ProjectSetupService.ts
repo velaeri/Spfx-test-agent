@@ -146,10 +146,17 @@ export class ProjectSetupService {
             cancellable: false
         }, async (progress) => {
             try {
-                // Step 1: Create jest.config.js if missing
+                // Step 1: Ensure jest.config.js with ts-jest (create or fix)
                 if (!status.hasJestConfig || options.force) {
-                    progress.report({ message: 'Creating jest.config.js...', increment: 30 });
+                    progress.report({ message: 'Creating jest.config.js with ts-jest...', increment: 30 });
                     await this.configService.createJestConfig(projectRoot);
+                } else {
+                    // Validate existing config has ts-jest
+                    progress.report({ message: 'Validating jest.config.js...', increment: 15 });
+                    const configUpdated = await this.configService.ensureValidJestConfig(projectRoot);
+                    if (configUpdated) {
+                        progress.report({ message: 'Updated jest.config.js with ts-jest...', increment: 15 });
+                    }
                 }
 
                 // Step 2: Create jest.setup.js if missing

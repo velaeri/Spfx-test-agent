@@ -5,13 +5,8 @@ import { TestAgent } from './agent/TestAgent';
 import { Logger, LogLevel } from './services/Logger';
 import { StateService } from './services/StateService';
 import { ProjectSetupService } from './services/ProjectSetupService';
-import { JestConfigurationService } from './services/JestConfigurationService';
-import { PackageInstallationService } from './services/PackageInstallationService';
-import { DependencyDetectionService } from './services/DependencyDetectionService';
 import { TelemetryService } from './services/TelemetryService';
-import { LLMProviderFactory } from './factories/LLMProviderFactory';
 import { FileScanner } from './utils/FileScanner';
-import { ConfigService } from './services/ConfigService';
 import { 
     WorkspaceNotFoundError, 
     FileValidationError,
@@ -86,62 +81,80 @@ export async function handleSetupRequest(
         stream.markdown(`📁 Proyecto: **${projects[0].name}**\n\n`);
     }
 
-    // Force strict setup with autoInstall check
-    stream.progress('Verificando estado para instalación completa...');
-    
-    // Perform FULL setup (create config files + install dependencies)
-    stream.markdown(`\n🔧 **Iniciando configuración completa (Config + Dependencias)...**\n\n`);
-    
-    const setupResult = await setupService.setupProject(workspaceRoot, { autoInstall: true });
+    stream.progress('Verificando estado actual...');
+    const setupStatus = await setupService.checkProjectSetup(workspaceRoot);
+
+    // Show current status
+    stream.markdown(`### 📊 Estado Actual\n\n`);
+    stream.markdown(`- Package.json: ${setupStatus.hasPackageJson ? '✅' : '❌'}\n`);
+    stream.markdown(`- Jest instalado: ${setupStatus.hasJest ? '✅' : '❌'}\n`);
+    stream.markdown(`- Jest config: ${setupStatus.hasJestConfig ? '✅' : '⚠️ (se creará)'}\n`);
+    stream.markdown(`- Jest setup: ${setupStatus.hasJestSetup ? '✅' : '⚠️ (se creará)'}\n`);
+    stream.markdown(`- Dependencias faltantes: **${setupStatus.missingDependencies.length}**\n\n`);
+
+    if (setupStatus.missingDependencies.length > 0) {
+        stream.markdown(`### 📦 Dependencias a Instalar\n\n`);
+        setupStatus.missingDependencies.forEach(dep => {
+            stream.markdown(`  - \`${dep}\`\n`);
+        });
+        stream.markdown(`\n`);
+    }
+
+    // Check if already configured
+    if (setupStatus.hasJest && 
+        setupStatus.missingDependencies.length === 0 && 
+        setupStatus.hasJestConfig && 
+        setupStatus.hasJestSetup) {
+        stream.markdown(`✅ **¡El entorno Jest ya está completamente configurado!**\n\n`);
+        stream.markdown(`Puedes usar \`@spfx-tester /generate\` para generar tests.\n`);
+        return { metadata: { command: 'setup' } };
+    }
+
+    // Perform setup (create config files, generate install command)
+    stream.markdown(`\n🔧 **Creando archivos de configuración...**\n\n`);
+    stream.progress('Creando archivos Jest...');
+
+    const setupResult = await setupService.setupProject(workspaceRoot);
 
     if (!setupResult.success) {
-        stream.markdown(`\n❌ **Error crítico en el Setup**\n\n`);
+        stream.markdown(`\n❌ **Error al crear archivos de configuración**\n\n`);
         stream.markdown(`Por favor, revisa el Output Channel "SPFX Test Agent" para más detalles.\n`);
         return { errorDetails: { message: 'Setup failed' } };
     }
 
-    // After setup, VERIFY installation with a dry-run check
-    stream.progress('Verificando instalación...');
-    const verifyStatus = await setupService.checkProjectSetup(workspaceRoot);
+    // Show success message
+    stream.markdown(`\n✅ **Archivos de configuración creados correctamente**\n\n`);
     
-    // Explicitly check ts-jest installation
-    const configService = new JestConfigurationService();
-    const tsJestInstalled = configService.isTsJestInstalled(workspaceRoot);
-
-    // Run verification test
-    let verificationPassed = false;
-    let verificationMsg = '';
-
-    if (verifyStatus.missingDependencies.length === 0 && tsJestInstalled) {
-        stream.progress('Ejecutando test de verificación...');
-        const verifyResult = await setupService.verifyInstallation(workspaceRoot);
-        verificationPassed = verifyResult.success;
-        verificationMsg = verifyResult.message;
-    }
-
-    if (verifyStatus.missingDependencies.length === 0 && tsJestInstalled && verificationPassed) {
-         stream.markdown(`\n🎉 **Configuración Completada y Verificada**\n\n`);
-         stream.markdown(`✅ Dependencias instaladas (Jest, ts-jest, types)\n`);
-         stream.markdown(`✅ Archivos de configuración creados\n`);
-         stream.markdown(`✅ Scripts de package.json actualizados\n`);
-         stream.markdown(`✅ **Test de verificación pasado correctamente**\n\n`);
-         stream.markdown(`**Listo para usar:** \`@spfx-tester /generate-all\`\n`);
-         telemetryService.trackSetup(true, Date.now() - setupStartTime);
-         return { metadata: { command: 'setup' } };
+    // If there are missing dependencies, show the install command
+    if (setupResult.installCommand) {
+        stream.markdown(`### 📦 Instalación de Dependencias\n\n`);
+        stream.markdown(`⚠️ **Faltan ${setupStatus.missingDependencies.length} dependencias Jest**\n\n`);
+        stream.markdown(`Por favor, ejecuta el siguiente comando en el terminal:\n\n`);
+        stream.markdown(`\`\`\`bash\n${setupResult.installCommand}\n\`\`\`\n\n`);
+        stream.button({
+            command: 'workbench.action.terminal.sendSequence',
+            arguments: [{ text: `${setupResult.installCommand}\n` }],
+            title: '▶️ Ejecutar comando'
+        });
+        stream.markdown(`\n\n💡 **Nota:** Este comando usa \`--legacy-peer-deps\` para evitar conflictos de dependencias peer.\n\n`);
+        stream.markdown(`Las versiones han sido analizadas por IA para garantizar compatibilidad con tu proyecto.\n\n`);
     } else {
-          stream.markdown(`\n⚠️ **Advertencia post-instalación**\n\n`);
-          stream.markdown(`El proceso terminó, pero hubo problemas de verificación:\n`);
-          if (!tsJestInstalled) stream.markdown(`- ❌ \`ts-jest\` no encontrado en node_modules\n`);
-          verifyStatus.missingDependencies.forEach(d => stream.markdown(`- ❌ Faltante: \`${d}\`\n`));
-          
-          if (!verificationPassed && verificationMsg) {
-             stream.markdown(`- ❌ **El test de verificación falló:**\n`);
-             stream.markdown(`\`\`\`\n${verificationMsg}\n\`\`\`\n`);
-          }
-
-          stream.markdown(`\nIntenta ejecutar manualmente: \`npm install\` y revisa los logs.\n`);
-          return { errorDetails: { message: 'Verification failed' } };
+        stream.markdown(`### 🎉 Configuración Completada\n\n`);
+        stream.markdown(`✅ Todas las dependencias ya están instaladas\n`);
     }
+    
+    stream.markdown(`### 📁 Archivos Creados\n\n`);
+    stream.markdown(`- \`jest.config.js\` - Configuración de Jest\n`);
+    stream.markdown(`- \`jest.setup.js\` - Inicialización de testing-library\n`);
+    stream.markdown(`- \`__mocks__/fileMock.js\` - Mock para archivos estáticos\n\n`);
+    stream.markdown(`**Siguiente paso:** Usa \`@spfx-tester /generate\` para generar tests automáticamente.\n`);
+
+    const setupDuration = Date.now() - setupStartTime;
+    telemetryService.trackSetup(setupResult.success, setupDuration);
+
+    logger.info('Setup completed successfully via chat command');
+
+    return { metadata: { command: 'setup' } };
 }
 
 /**
@@ -161,100 +174,38 @@ async function ensureJestEnvironment(
         return false;
     }
 
-    // CRITICAL: Also check if ts-jest is physically in node_modules
-    const configService = new JestConfigurationService();
-    const tsJestInstalled = configService.isTsJestInstalled(workspaceRoot);
-    if (!tsJestInstalled && !setupStatus.missingDependencies.includes('ts-jest')) {
-        setupStatus.missingDependencies.push('ts-jest');
-    }
-
     // Check if setup is needed
     if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
-        stream.markdown(`\n⚠️ **Entorno Jest incompleto**\n\n`);
+        stream.markdown(`\n❌ **Entorno Jest no está listo**\n\n`);
         stream.markdown(`- Jest instalado: ${setupStatus.hasJest ? '✅' : '❌'}\n`);
-        stream.markdown(`- ts-jest en node_modules: ${tsJestInstalled ? '✅' : '❌ (REQUERIDO)'}\n`);
         stream.markdown(`- Dependencias faltantes: **${setupStatus.missingDependencies.length}**\n\n`);
 
-        //  Use intelligent installation with LLM analysis
-        stream.markdown(`🧠 **Intentando instalación inteligente con análisis de IA...**\n\n`);
-        stream.progress('Analizando proyecto y consultando IA...');
-
-        try {
-            const pkgService = new PackageInstallationService();
-            const depService = new DependencyDetectionService();
-            const config = ConfigService.getConfig();
-
-            // First attempt: try heuristic versions
-            const existingJest = depService.getExistingJestVersion(workspaceRoot);
-            const tsJestVersion = (existingJest && existingJest.major === 28) ? '^28.0.8' : '^29.1.1';
-            const typesJestVersion = (existingJest && existingJest.major === 28) ? '^28.1.0' : '^29.5.11';
-
-            stream.markdown(`📦 Instalando dependencias básicas...\n`);
-            let result = await pkgService.installPackages(workspaceRoot, [
-                `ts-jest@${tsJestVersion}`,
-                `@types/jest@${typesJestVersion}`,
-                'identity-obj-proxy@^3.0.0'
-            ]);
-
-            // If failed, use AI to analyze and fix
-            if (!result.success && result.error) {
-                stream.markdown(`⚠️ Instalación inicial falló. Consultando IA para análisis...\n\n`);
-                
-                const packageJsonPath = path.join(workspaceRoot, 'package.json');
-                const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-
-                const llmProvider = LLMProviderFactory.createProvider();
-                const solution = await llmProvider.analyzeAndFixError(result.error, {
-                    packageJson,
-                    errorType: 'dependency'
-                });
-
-                stream.markdown(`💡 **AI Diagnosis:** ${solution.diagnosis}\n\n`);
-
-                if (solution.packages && solution.packages.length > 0) {
-                    stream.markdown(`📦 Instalando versiones recomendadas por IA: ${solution.packages.join(', ')}\n`);
-                    result = await pkgService.installPackages(workspaceRoot, solution.packages);
-
-                    if (!result.success) {
-                        throw new Error(`AI-recommended installation also failed: ${result.error}`);
-                    }
-                }
-            }
-
-            // Create config files if needed
-            const configCreated = await configService.ensureValidJestConfig(workspaceRoot);
-            if (configCreated) {
-                stream.markdown(`🔧 Creado jest.config.js con ts-jest\n`);
-            }
-
-            const jestSetupPath = path.join(workspaceRoot, 'jest.setup.js');
-            if (!fs.existsSync(jestSetupPath)) {
-                await configService.createJestSetup(workspaceRoot);
-            }
-            await configService.createMockDirectory(workspaceRoot);
-            await configService.updatePackageJsonScripts(workspaceRoot);
-
-            stream.markdown(`\n✅ **Entorno configurado exitosamente con análisis IA**\n\n`);
-            return true;
-        } catch (error) {
-            stream.markdown(`\n❌ **La instalación inteligente falló**\n\n`);
-            logger.error('Intelligent setup failed', error);
-            
-            const errorMsg = error instanceof Error ? error.message : 'Error desconocido';
-            stream.markdown(`Error: ${errorMsg}\n\n`);
-
-            // Fallback: ask user to run manual setup
-            stream.markdown(`### ⚠️ Acción Requerida (setup manual)\n\n`);
-            stream.markdown(`El análisis automático con IA no pudo resolver el problema.\n\n`);
-            stream.markdown(`Por favor, ejecuta \`/setup\` para configuración manual.\n\n`);
-
-            stream.button({
-                command: 'spfx-tester.setup',
-                title: '🛠️ Ejecutar @spfx-tester /setup ahora'
+        if (setupStatus.missingDependencies.length > 0) {
+            stream.markdown(`### 📦 Dependencias Faltantes\n\n`);
+            setupStatus.missingDependencies.forEach(dep => {
+                stream.markdown(`  - \`${dep}\`\n`);
             });
-            
-            return false;
+            stream.markdown(`\n`);
         }
+
+        stream.markdown(`### ⚠️ Acción Requerida\n\n`);
+        stream.markdown(`**No puedo generar tests sin las dependencias Jest instaladas.**\n\n`);
+        
+        if (setupStatus.installCommand) {
+            stream.markdown(`Por favor, ejecuta el siguiente comando en el terminal:\n\n`);
+            stream.markdown(`\`\`\`bash\n${setupStatus.installCommand}\n\`\`\`\n\n`);
+            stream.button({
+                command: 'workbench.action.terminal.sendSequence',
+                arguments: [{ text: `${setupStatus.installCommand}\n` }],
+                title: '▶️ Ejecutar comando'
+            });
+            stream.markdown(`\n\n`);
+        }
+        
+        stream.markdown(`**O usa:** \`@spfx-tester /setup\` para configurar el entorno paso a paso.\n\n`);
+        stream.markdown(`Después de instalar las dependencias, vuelve a ejecutar \`/generate-all\`.\n`);
+        
+        return false;
     } else {
         stream.markdown(`✅ Entorno Jest listo\n\n`);
         return true;
@@ -319,8 +270,7 @@ export async function handleGenerateSingleRequest(
     stream.markdown(`Usando workflow agentico con capacidades de auto-reparación...\n\n`);
 
     // Create and run the test agent
-    const llmProvider = LLMProviderFactory.createProvider();
-    const agent = new TestAgent(llmProvider, stateService);
+    const agent = new TestAgent(undefined, stateService);
     
     try {
         const testFilePath = await agent.generateAndHealTest(
@@ -359,43 +309,21 @@ export async function handleGenerateAllRequest(
     const batchStartTime = Date.now();
     telemetryService.trackCommandExecution('generate-all');
     
-    // Determine which folders/URIs to scan
-    let scanTargets: (vscode.WorkspaceFolder | vscode.Uri)[] = [];
+    // Get all workspace folders
+    const workspaceFolders = vscode.workspace.workspaceFolders;
     
-    if (targetPath) {
-        // User provided a specific path
-        const normalizedPath = path.resolve(targetPath);
-        
-        if (fs.existsSync(normalizedPath)) {
-            const uri = vscode.Uri.file(normalizedPath);
-            scanTargets = [uri];
-            logger.info(`Using specified path: ${normalizedPath}`);
-        } else {
-            stream.markdown(`❌ **Error:** La ruta especificada no existe: \`${targetPath}\`\n\n`);
-            return { metadata: { command: 'generate-all', error: 'Invalid path' } };
-        }
-    } else {
-        // No specific path - use all workspace folders
-        const workspaceFolders = vscode.workspace.workspaceFolders;
-        
-        if (!workspaceFolders || workspaceFolders.length === 0) {
-            throw new WorkspaceNotFoundError();
-        }
-        
-        scanTargets = [...workspaceFolders];
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        throw new WorkspaceNotFoundError();
     }
 
-    stream.markdown(`## 🚀 Generando Tests${targetPath ? ' para Proyecto Específico' : ' para Todo el Workspace'}\n\n`);
-    if (targetPath) {
-        stream.markdown(`📂 **Ruta de escaneo:** \`${targetPath}\`\n\n`);
-    }
+    stream.markdown(`## 🚀 Generando Tests para Todo el Workspace\n\n`);
     stream.progress('Escaneando archivos fuente...');
 
     let allFiles: vscode.Uri[] = [];
 
-    // Scan target folders/URIs
-    for (const target of scanTargets) {
-        const files = await FileScanner.findSourceFiles(target);
+    // Scan all workspace folders
+    for (const folder of workspaceFolders) {
+        const files = await FileScanner.findSourceFiles(folder);
         allFiles = allFiles.concat(files);
     }
 
@@ -443,8 +371,7 @@ export async function handleGenerateAllRequest(
     for (const [projectRoot, files] of projectMap.entries()) {
         stream.markdown(`### Proyecto: \`${path.basename(projectRoot)}\`\n\n`);
         
-        const llmProvider = LLMProviderFactory.createProvider();
-        const agent = new TestAgent(llmProvider, stateService);
+        const agent = new TestAgent(undefined, stateService);
 
         for (const file of files) {
             if (token.isCancellationRequested) {

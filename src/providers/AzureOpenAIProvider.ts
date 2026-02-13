@@ -44,11 +44,7 @@ export class AzureOpenAIProvider implements ILLMProvider {
         if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
 
         const systemPrompt = PROMPTS.SYSTEM;
-        const userPrompt = PROMPTS.GENERATE_TEST(
-            context.fileName, 
-            context.sourceCode,
-            context.dependencyContext || ''
-        );
+        const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode);
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -59,15 +55,16 @@ export class AzureOpenAIProvider implements ILLMProvider {
 
         const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
 
-        const userPrompt = PROMPTS.FIX_TEST(
-            attemptStr, 
-            context.fileName, 
-            context.currentTestCode || '',
-            context.errorContext,
-            context.sourceCode,
-            context.dependencyContext || '',
-            context.environmentHints || ''
-        );
+        const errorContext = context.errorContext || '';
+        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token') || errorContext.includes('Missing semicolon');
+        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft') || errorContext.includes('vscode');
+
+        let specificGuidance = '';
+        if (isSyntaxError && isMockError) {
+            specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
+        }
+
+        const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, errorContext, specificGuidance, context.sourceCode);
 
         return await this.sendRequest(PROMPTS.SYSTEM, userPrompt);
     }

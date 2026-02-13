@@ -72,8 +72,8 @@ export class CopilotProvider implements ILLMProvider {
     public async generateTest(context: TestContext): Promise<LLMResult> {
         this.logger.info(`Generating test for ${context.fileName} (attempt ${context.attempt || 1})`);
 
-        const systemPrompt = PROMPTS.SYSTEM;
-        const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode);
+        const systemPrompt = context.systemPrompt || PROMPTS.SYSTEM;
+        const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode, context.dependencyContext);
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -88,7 +88,7 @@ export class CopilotProvider implements ILLMProvider {
             throw new Error('Error context is required for fixing tests');
         }
 
-        const systemPrompt = PROMPTS.SYSTEM;
+        const systemPrompt = context.systemPrompt || PROMPTS.SYSTEM;
         const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
 
         const errorContext = context.errorContext || '';
@@ -100,7 +100,7 @@ export class CopilotProvider implements ILLMProvider {
             specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
         }
 
-        const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, errorContext, specificGuidance, context.sourceCode);
+        const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, context.currentTestCode || '', errorContext, specificGuidance, context.sourceCode);
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }

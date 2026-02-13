@@ -43,8 +43,8 @@ export class AzureOpenAIProvider implements ILLMProvider {
     public async generateTest(context: TestContext): Promise<LLMResult> {
         if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
 
-        const systemPrompt = PROMPTS.SYSTEM;
-        const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode);
+        const systemPrompt = context.systemPrompt || PROMPTS.SYSTEM;
+        const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode, context.dependencyContext);
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -64,9 +64,9 @@ export class AzureOpenAIProvider implements ILLMProvider {
             specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
         }
 
-        const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, errorContext, specificGuidance, context.sourceCode);
+        const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, context.currentTestCode || '', errorContext, specificGuidance, context.sourceCode);
 
-        return await this.sendRequest(PROMPTS.SYSTEM, userPrompt);
+        return await this.sendRequest(context.systemPrompt || PROMPTS.SYSTEM, userPrompt);
     }
 
     public async analyzeAndFixError(

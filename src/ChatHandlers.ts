@@ -6,6 +6,7 @@ import { Logger, LogLevel } from './services/Logger';
 import { StateService } from './services/StateService';
 import { ProjectSetupService } from './services/ProjectSetupService';
 import { TelemetryService } from './services/TelemetryService';
+import { CoverageService, CoverageReport } from './services/CoverageService';
 import { FileScanner } from './utils/FileScanner';
 import { 
     WorkspaceNotFoundError, 
@@ -411,11 +412,106 @@ export async function handleGenerateAllRequest(
         }
     }
 
+    // ─── Coverage-driven iteration ───────────────────────────────────
+    const coverageService = new CoverageService();
+    const coverageThreshold = 80;
+    const maxCoverageIterations = 2; // extra passes after initial batch
+
+    stream.markdown(`\n---\n\n## 📊 Coverage Analysis\n\n`);
+    stream.progress('Running coverage analysis...');
+
+    let coverageReport: CoverageReport | undefined;
+    try {
+        coverageReport = await coverageService.runCoverage(firstProjectRoot, coverageThreshold);
+        stream.markdown(coverageService.formatReportAsMarkdown(coverageReport));
+    } catch (error) {
+        logger.error('Coverage analysis failed', error);
+        stream.markdown('⚠️ Coverage analysis failed — skipping coverage-driven iteration.\n\n');
+    }
+
+    // Coverage-driven heal loop: generate tests for files still below threshold
+    if (coverageReport && !coverageReport.meetsThreshold) {
+        for (let iteration = 1; iteration <= maxCoverageIterations; iteration++) {
+            if (token.isCancellationRequested) {
+                stream.markdown('\n⚠️ Coverage iteration cancelled by user\n');
+                break;
+            }
+
+            const filesNeedingCoverage = coverageService.getFilesNeedingCoverage(coverageReport!);
+            if (filesNeedingCoverage.length === 0) { break; }
+
+            stream.markdown(`\n### 🔄 Coverage Iteration ${iteration}/${maxCoverageIterations}\n\n`);
+            stream.markdown(`Targeting **${filesNeedingCoverage.length}** files below ${coverageThreshold}%\n\n`);
+
+            const iterAgent = new TestAgent(undefined, stateService);
+            let iterSuccess = 0;
+            let iterFail = 0;
+
+            // Process up to 10 highest-ROI files per iteration
+            const filesToProcess = filesNeedingCoverage.slice(0, 10);
+            for (const filePath of filesToProcess) {
+                if (token.isCancellationRequested) { break; }
+
+                const fileName = path.basename(filePath);
+                stream.progress(`[coverage iter ${iteration}] ${fileName}...`);
+
+                try {
+                    // Determine project root for this file
+                    const fileUri = vscode.Uri.file(filePath);
+                    const fileFolder = vscode.workspace.getWorkspaceFolder(fileUri);
+                    const projectRoot = fileFolder?.uri.fsPath || firstProjectRoot;
+
+                    await iterAgent.generateAndHealTest(filePath, projectRoot, stream, 'balanced');
+                    iterSuccess++;
+                    successCount++;
+                } catch (error) {
+                    iterFail++;
+                    failCount++;
+                    const errorMsg = error instanceof Error ? error.message : 'Error';
+                    stream.markdown(`❌ \`${fileName}\`: ${errorMsg}\n`);
+                    logger.error(`Coverage iteration: failed for ${fileName}`, error);
+                }
+
+                // Rate-limit pause between files
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            stream.markdown(`\n✅ Iteration ${iteration}: ${iterSuccess} generated, ${iterFail} failed\n\n`);
+
+            // Re-run coverage after this iteration
+            stream.progress('Re-running coverage analysis...');
+            const previousReport = coverageReport;
+            try {
+                coverageReport = await coverageService.runCoverage(firstProjectRoot, coverageThreshold);
+                stream.markdown(coverageService.compareCoverage(previousReport!, coverageReport));
+
+                if (coverageReport.meetsThreshold) {
+                    stream.markdown(`\n🎉 **Coverage target ≥${coverageThreshold}% reached!**\n\n`);
+                    break;
+                }
+            } catch (error) {
+                logger.error('Coverage re-analysis failed', error);
+                stream.markdown('⚠️ Coverage re-analysis failed — stopping iteration.\n');
+                break;
+            }
+        }
+
+        // Final coverage dashboard
+        if (coverageReport) {
+            stream.markdown(`\n---\n\n`);
+            stream.markdown(coverageService.formatReportAsMarkdown(coverageReport));
+        }
+    }
+
     // Summary
-    stream.markdown(`\n---\n\n## 📊 Resumen\n\n`);
+    stream.markdown(`\n---\n\n## 📊 Resumen Final\n\n`);
     stream.markdown(`- ✅ Generados exitosamente: **${successCount}** tests\n`);
     stream.markdown(`- ❌ Fallidos: **${failCount}** tests\n`);
-    stream.markdown(`- 📝 Total procesados: **${currentFile}** archivos\n\n`);
+    stream.markdown(`- 📝 Total procesados: **${currentFile}** archivos (initial batch)\n`);
+    if (coverageReport) {
+        stream.markdown(`- 📈 Coverage final: **${coverageReport.global.statements.toFixed(1)}%** statements\n`);
+    }
+    stream.markdown(`\n`);
 
     const batchDuration = Date.now() - batchStartTime;
     telemetryService.trackBatchGeneration(

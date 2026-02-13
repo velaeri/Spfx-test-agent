@@ -11,6 +11,9 @@ import { ConfigService } from '../services/ConfigService';
 import { StateService, TestGenerationHistory } from '../services/StateService';
 import { ProjectSetupService } from '../services/ProjectSetupService';
 import { TelemetryService } from '../services/TelemetryService';
+import { SourceContextCollector } from '../utils/SourceContextCollector';
+import { StackDiscoveryService, ProjectStack } from '../services/StackDiscoveryService';
+import { PROMPTS } from '../utils/prompts';
 import { 
     JestNotFoundError, 
     TestGenerationError, 
@@ -34,12 +37,17 @@ export class TestAgent {
     private stateService?: StateService;
     private setupService: ProjectSetupService;
     private telemetryService: TelemetryService;
+    private contextCollector: SourceContextCollector;
+    private stackDiscovery: StackDiscoveryService;
+    private detectedStack?: ProjectStack;
 
     constructor(llmProvider?: ILLMProvider, stateService?: StateService) {
         this.testRunner = new TestRunner();
         this.logger = Logger.getInstance();
         this.setupService = new ProjectSetupService();
         this.telemetryService = TelemetryService.getInstance();
+        this.contextCollector = new SourceContextCollector();
+        this.stackDiscovery = new StackDiscoveryService();
         
         // Use provided LLM provider or create default Copilot provider
         if (llmProvider) {
@@ -119,7 +127,42 @@ export class TestAgent {
             sourceFile: sourceFileName,
             workspace: workspaceRoot
         });
-        stream.progress('Reading source file...');
+        stream.progress('Collecting source context...');
+
+        // Collect dependency context for more accurate test generation
+        let dependencyContext: string | undefined;
+        try {
+            const fullContext = await this.contextCollector.collectContext(sourceFilePath, workspaceRoot);
+            dependencyContext = this.contextCollector.formatForPrompt(fullContext);
+            if (dependencyContext) {
+                this.logger.info('Dependency context collected', {
+                    dependencies: fullContext.dependencies.size,
+                    spfxPatterns: fullContext.spfxPatterns.length
+                });
+            }
+        } catch (error) {
+            this.logger.warn('Failed to collect dependency context, proceeding without it', error);
+        }
+
+        // Discover project stack (cached per workspace) for dynamic prompts
+        let systemPrompt: string | undefined;
+        try {
+            if (!this.detectedStack) {
+                stream.progress('Discovering project stack...');
+                this.detectedStack = await this.stackDiscovery.discover(workspaceRoot);
+                this.logger.info('Stack discovered', {
+                    framework: this.detectedStack.framework,
+                    language: this.detectedStack.language,
+                    testRunner: this.detectedStack.testRunner,
+                    confidence: this.detectedStack.confidence
+                });
+                const summary = this.stackDiscovery.formatStackSummary(this.detectedStack);
+                stream.markdown(`📦 **Detected stack:** ${summary}\n\n`);
+            }
+            systemPrompt = PROMPTS.buildSystemPrompt(this.detectedStack);
+        } catch (error) {
+            this.logger.warn('Stack discovery failed, using default prompts', error);
+        }
 
         // Determine test file path
         const testFilePath = this.getTestFilePath(sourceFilePath, config.testFilePattern);
@@ -131,6 +174,8 @@ export class TestAgent {
         let result = await this.llmProvider.generateTest({
             sourceCode,
             fileName: sourceFileName,
+            dependencyContext,
+            systemPrompt,
             attempt: 1,
             maxAttempts: config.maxHealingAttempts
         });
@@ -179,11 +224,19 @@ export class TestAgent {
             await this.sleep(config.initialBackoffMs * attempt);
 
             try {
+                // Read the current failing test code to send to LLM
+                const currentTestCode = fs.existsSync(testFilePath) 
+                    ? fs.readFileSync(testFilePath, 'utf-8') 
+                    : '';
+
                 // Ask LLM to fix the test
                 result = await this.llmProvider.fixTest({
                     sourceCode,
                     fileName: sourceFileName,
+                    currentTestCode,
                     errorContext: cleanedError,
+                    dependencyContext,
+                    systemPrompt,
                     attempt,
                     maxAttempts: config.maxHealingAttempts
                 });

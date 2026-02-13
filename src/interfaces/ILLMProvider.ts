@@ -11,6 +11,8 @@ export interface TestContext {
     currentTestCode?: string;
     /** Hints about environment issues detected */
     environmentHints?: string;
+    /** Dynamic system prompt (built from detected stack) */
+    systemPrompt?: string;
     attempt?: number;
     maxAttempts?: number;
 }

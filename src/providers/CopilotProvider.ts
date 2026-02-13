@@ -364,9 +364,21 @@ If no packages need installing, use empty array. If no commands needed, omit the
 
     /**
      * Detect missing dependencies based on package.json content
+     * Supports retry with feedback from previous failed attempts
      */
-    public async detectDependencies(packageJsonContent: any): Promise<Record<string, string>> {
+    public async detectDependencies(
+        packageJsonContent: any,
+        previousAttempt?: { error: string; attemptNumber: number }
+    ): Promise<Record<string, string>> {
         this.logger.info('Analyzing dependencies via Copilot...');
+
+        let retryGuidance = '';
+        if (previousAttempt) {
+            retryGuidance = `\n\n**PREVIOUS ATTEMPT ${previousAttempt.attemptNumber} FAILED:**
+${previousAttempt.error}
+
+Please suggest DIFFERENT versions that avoid this error. Verify versions exist in npm registry.`;
+        }
 
         const prompt = `Analyze this package.json and determine which Jest testing dependencies are missing or need to be installed.
 
@@ -382,6 +394,7 @@ ${JSON.stringify({
 1. Analyze the EXISTING dependencies to determine what Jest packages are already installed
 2. Determine what ADDITIONAL packages (if any) are needed for a complete Jest + React Testing Library setup
 3. For any missing packages, recommend versions that are COMPATIBLE with the existing dependencies
+4. IMPORTANT: Only suggest versions that ACTUALLY EXIST in npm registry${retryGuidance}
 
 **Required packages for full Jest + React Testing Library:**
 - jest
@@ -397,7 +410,7 @@ ${JSON.stringify({
 Return ONLY a JSON object mapping package names to their recommended version strings (e.g. {"jest": "^29.0.0"}). If everything is already installed, return an empty object {}. No markdown, no explanations outside the JSON block.`;
 
         try {
-            const systemPrompt = "You are a dependency management assistant. You return only JSON.";
+            const systemPrompt = "You are a dependency management assistant. You return only JSON with valid npm versions.";
             const response = await this.sendRequest(systemPrompt, prompt);
             
             // Try to parse JSON from the response
@@ -422,6 +435,199 @@ Return ONLY a JSON object mapping package names to their recommended version str
         } catch (error) {
             this.logger.error('LLM dependency detection failed', error);
             return {};
+        }
+    }
+
+    // ===== LLM-First Planning Methods =====
+
+    /**
+     * Plan test strategy by analyzing source code and project context
+     */
+    public async planTestStrategy(context: {
+        sourceCode: string;
+        fileName: string;
+        projectAnalysis: any;
+        existingTestPatterns?: string[];
+    }): Promise<any> {
+        this.logger.info(`Planning test strategy for ${context.fileName}`);
+
+        const patternsContext = context.existingTestPatterns && context.existingTestPatterns.length > 0
+            ? `\n\n**Successful patterns from previous tests:**\n${context.existingTestPatterns.slice(0, 3).join('\n\n')}`
+            : '';
+
+        const prompt = `Analyze this source file and plan an optimal testing strategy.
+
+**File:** ${context.fileName}
+**Source Code:**
+\`\`\`typescript
+${context.sourceCode.substring(0, 3000)}
+\`\`\`
+
+**Project Context:**
+- Framework: ${context.projectAnalysis.framework || 'Unknown'}
+- React Version: ${context.projectAnalysis.reactVersion || 'Unknown'}
+- Existing tests: ${context.projectAnalysis.existingTests?.length || 0} files${patternsContext}
+
+**Task:** Analyze and return a JSON strategy with:
+- \`approach\`: "unit" | "integration" | "component"
+- \`mockingStrategy\`: "minimal" | "moderate" | "extensive"
+- \`mocksNeeded\`: array of items to mock (e.g., ["SPHttpClient", "WebPartContext"])
+- \`testStructure\`: description (e.g., "describe block with 5 test cases")
+- \`expectedCoverage\`: number (e.g., 85)
+- \`potentialIssues\`: array of potential problems (e.g., ["SharePoint context needs mocking"])
+- \`estimatedIterations\`: number of expected fix attempts (1-3)
+
+Return ONLY valid JSON, no markdown or explanations.`;
+
+        try {
+            const response = await this.sendRequest(
+                "You are a test planning expert. You return only JSON.",
+                prompt
+            );
+            const jsonStr = this.extractJsonFromResponse(response.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to plan test strategy', error);
+            // Return default strategy
+            return {
+                approach: 'unit',
+                mockingStrategy: 'moderate',
+                mocksNeeded: [],
+                testStructure: 'standard describe/it structure',
+                expectedCoverage: 80,
+                potentialIssues: [],
+                estimatedIterations: 2
+            };
+        }
+    }
+
+    /**
+     * Generate personalized Jest configuration
+     */
+    public async generateJestConfig(context: {
+        projectAnalysis: any;
+        requirements: string[];
+    }): Promise<any> {
+        this.logger.info('Generating personalized Jest config');
+
+        const prompt = `Generate a custom Jest configuration for this project.
+
+**Project Analysis:**
+\`\`\`json
+${JSON.stringify(context.projectAnalysis, null, 2)}
+\`\`\`
+
+**Requirements:**
+${context.requirements.map((r, i) => `${i + 1}. ${r}`).join('\n')}
+
+**Task:** Generate configuration files and return JSON with:
+- \`configJs\`: Full jest.config.js content
+- \`setupJs\`: Full jest.setup.js content
+- \`mocks\`: Object mapping mock file paths to their content
+- \`explanation\`: Brief explanation of key configuration choices
+
+Return ONLY valid JSON.`;
+
+        try {
+            const response = await this.sendRequest(
+                "You are a Jest configuration expert. Return only JSON.",
+                prompt
+            );
+            const jsonStr = this.extractJsonFromResponse(response.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to generate Jest config', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Plan batch test generation with intelligent prioritization
+     */
+    public async planBatchGeneration(context: {
+        allFiles: string[];
+        projectStructure: any;
+        existingTests: string[];
+        dependencies: Record<string, string[]>;
+    }): Promise<any> {
+        this.logger.info(`Planning batch generation for ${context.allFiles.length} files`);
+
+        const prompt = `Plan an optimal batch test generation strategy.
+
+**Files to test:** ${context.allFiles.length} files
+**Sample files:**
+${context.allFiles.slice(0, 10).map(f => `  - ${f}`).join('\n')}
+${context.allFiles.length > 10 ? `  ... and ${context.allFiles.length - 10} more` : ''}
+
+**Existing tests:** ${context.existingTests.length}
+**Project structure:** ${JSON.stringify(context.projectStructure, null, 2).substring(0, 500)}
+
+**Task:** Create a batch generation plan with:
+- \`groups\`: Array of {name, priority(1-5), files[], reason}
+  - Priority 1 = most critical (core business logic, APIs, services)
+  - Priority 5 = least critical (utilities, constants, types)
+  - Group related files together (a service + its models)
+- \`estimatedTime\`: Human-readable time estimate (e.g., "15 minutes")
+- \`recommendedConcurrency\`: Number of files to process in parallel (1-5)
+
+Return ONLY valid JSON.`;
+
+        try {
+            const response = await this.sendRequest(
+                "You are a test planning expert. Return only JSON.",
+                prompt
+            );
+            const jsonStr = this.extractJsonFromResponse(response.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to plan batch generation', error);
+            // Return simple sequential plan
+            return {
+                groups: [{
+                    name: 'All Files',
+                    priority: 3,
+                    files: context.allFiles,
+                    reason: 'Sequential processing'
+                }],
+                estimatedTime: `${Math.ceil(context.allFiles.length * 45 / 60)} minutes`,
+                recommendedConcurrency: 1
+            };
+        }
+    }
+
+    /**
+     * Validate suggested versions and fix if needed
+     */
+    public async validateAndFixVersions(context: {
+        suggestedVersions: Record<string, string>;
+        validationErrors: string[];
+    }): Promise<Record<string, string>> {
+        this.logger.info('Validating and fixing package versions');
+
+        const prompt = `Fix package versions that don't exist in npm registry.
+
+**Suggested versions (some are invalid):**
+\`\`\`json
+${JSON.stringify(context.suggestedVersions, null, 2)}
+\`\`\`
+
+**Validation errors:**
+${context.validationErrors.map((e, i) => `${i + 1}. ${e}`).join('\n')}
+
+**Task:** Return CORRECTED versions that actually exist in npm. Research latest stable versions if needed.
+
+Return ONLY valid JSON mapping package names to corrected versions.`;
+
+        try {
+            const response = await this.sendRequest(
+                "You are an npm version expert. Return only JSON with valid versions.",
+                prompt
+            );
+            const jsonStr = this.extractJsonFromResponse(response.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to fix versions', error);
+            return context.suggestedVersions; // Return as-is if LLM fails
         }
     }
 }

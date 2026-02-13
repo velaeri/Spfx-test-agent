@@ -5,7 +5,7 @@ import { Logger } from './Logger';
 import { ConfigService } from './ConfigService';
 import { LLMProviderFactory } from '../factories/LLMProviderFactory';
 import { ILLMProvider } from '../interfaces/ILLMProvider';
-import { JEST_DEPENDENCIES, JEST_28_COMPATIBLE_DEPENDENCIES } from '../utils/constants';
+// ✨ v0.5.0: Removed hardcoded JEST_DEPENDENCIES imports - now using LLM-First approach
 
 
 
@@ -107,75 +107,96 @@ export class DependencyDetectionService {
     }
 
     /**
-     * Get compatible dependencies based on LLM analysis or fallback to heuristics
+     * Get compatible dependencies using LLM with retry loop (NO HARDCODED FALLBACK)
      */
     async getCompatibleDependencies(projectRoot: string): Promise<Record<string, string>> {
+        const maxRetries = 3;
+        let attempt = 0;
+        let lastError: string | undefined;
+
         // Get currently installed dependencies
         const packageJsonPath = path.join(projectRoot, 'package.json');
-        let installedDeps: Record<string, string> = {};
+        let packageJson: any = {};
         if (fs.existsSync(packageJsonPath)) {
-            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-            installedDeps = {
-                ...packageJson.dependencies || {},
-                ...packageJson.devDependencies || {}
-            };
+            packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
         }
 
-        // Determine which Jest version template to use
-        const existingJest = this.getExistingJestVersion(projectRoot);
-        let baseDeps = JEST_DEPENDENCIES;
-        if (existingJest && existingJest.major === 28) {
-            this.logger.info('Detected Jest 28.x, using compatible versions');
-            baseDeps = JEST_28_COMPATIBLE_DEPENDENCIES;
-        } else {
-            this.logger.info('Using Jest 29.x versions (default)');
+        const installedDeps: Record<string, string> = {
+            ...packageJson.dependencies || {},
+            ...packageJson.devDependencies || {}
+        };
+
+        this.logger.info('🧠 Using LLM to detect compatible dependencies...');
+
+        while (attempt < maxRetries) {
+            attempt++;
+            this.logger.info(`Attempt ${attempt}/${maxRetries}...`);
+
+            try {
+                const llmVersions = await this.llmProvider.detectDependencies(
+                    packageJson,
+                    lastError ? { error: lastError, attemptNumber: attempt - 1 } : undefined
+                );
+
+                if (llmVersions && Object.keys(llmVersions).length > 0) {
+                    this.logger.info('✅ LLM analysis completed', {
+                        missingCount: Object.keys(llmVersions).length,
+                        packages: Object.keys(llmVersions)
+                    });
+                    return llmVersions;
+                }
+
+                if (Object.keys(llmVersions).length === 0) {
+                    this.logger.info('✅ All dependencies already installed');
+                    return {};
+                }
+            } catch (error) {
+                lastError = error instanceof Error ? error.message : 'Unknown LLM error';
+                this.logger.warn(`❌ LLM attempt ${attempt} failed: ${lastError}`);
+                
+                if (attempt < maxRetries) {
+                    // Wait before retry
+                    await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                    continue;
+                }
+            }
         }
 
-        // CRITICAL: Always verify essential dependencies are installed
-        // ts-jest is REQUIRED for TypeScript projects, otherwise Babel will be used
-        const essentialDeps = ['ts-jest', '@types/jest'];
-        const missingDeps: Record<string, string> = {};
+        //  ✨ NEW: If LLM fails after retries, try "latest" strategy instead of hardcoded versions
+        this.logger.warn('⚠️ LLM failed after 3 attempts - using latest version strategy');
+        return this.getLatestCompatibleVersions(installedDeps);
+    }
+
+    /**
+     * Last resort: Suggest "latest" for missing essential packages
+     * This avoids hardcoded versions that may not exist
+     */
+    private getLatestCompatibleVersions(installedDeps: Record<string, string>): Record<string, string> {
+        const essentialPackages = [
+            'jest',
+            '@types/jest',
+            'ts-jest',
+            '@testing-library/react',
+            '@testing-library/jest-dom',
+            'react-test-renderer',
+            '@types/react-test-renderer',
+            'identity-obj-proxy'
+        ];
+
+        const missing: Record<string, string> = {};
         
-        for (const pkg of essentialDeps) {
+        for (const pkg of essentialPackages) {
             if (!installedDeps[pkg]) {
-                this.logger.warn(`CRITICAL: ${pkg} is missing - TypeScript tests will fail without it`);
-                missingDeps[pkg] = baseDeps[pkg as keyof typeof baseDeps] || JEST_DEPENDENCIES[pkg as keyof typeof JEST_DEPENDENCIES];
+                // Use "latest" tag - npm will resolve the newest stable version
+                missing[pkg] = 'latest';
             }
         }
 
-        // Try LLM for other dependencies (non-essential)
-        this.logger.info('🧠 Using LLM to analyze project and identify missing dependencies...');
-        try {
-            const llmVersions = await this.getCompatibleVersionsFromLLM(projectRoot);
-            if (llmVersions !== null && Object.keys(llmVersions).length > 0) {
-                this.logger.info('✅ LLM analysis completed', {
-                    missingCount: Object.keys(llmVersions).length,
-                    packages: Object.keys(llmVersions)
-                });
-                // Merge with essential deps (essential deps take priority)
-                return { ...llmVersions, ...missingDeps };
-            }
-        } catch (error) {
-            this.logger.warn('❌ LLM analysis threw error, falling back to heuristics', error);
-        }
-
-        // Fallback: Use heuristic detection and filter by what's already installed
-        this.logger.info('⚠️ LLM unavailable or returned empty, using heuristic detection...');
-        
-        // Check all base dependencies
-        for (const [pkg, version] of Object.entries(baseDeps)) {
-            if (!installedDeps[pkg] && !missingDeps[pkg]) {
-                missingDeps[pkg] = version;
-            }
-        }
-        
-        this.logger.info('Heuristic analysis complete', {
-            total: Object.keys(baseDeps).length,
-            installed: Object.keys(baseDeps).length - Object.keys(missingDeps).length,
-            missing: Object.keys(missingDeps).length,
-            missingPackages: Object.keys(missingDeps)
+        this.logger.info('Using "latest" strategy for missing packages', {
+            count: Object.keys(missing).length,
+            packages: Object.keys(missing)
         });
-        
-        return missingDeps;
+
+        return missing;
     }
 }

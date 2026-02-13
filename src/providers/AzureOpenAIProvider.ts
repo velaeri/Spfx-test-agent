@@ -291,4 +291,100 @@ If ALL packages are already installed, return:
         // Fallback: return as-is and let JSON.parse fail with better error
         return text.trim();
     }
+
+    // ===== LLM-First Planning Methods =====
+
+    public async planTestStrategy(context: {
+        sourceCode: string;
+        fileName: string;
+        projectAnalysis: any;
+        existingTestPatterns?: string[];
+    }): Promise<any> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info(`Planning test strategy for ${context.fileName}`);
+
+        const prompt = `Analyze this source file and plan an optimal testing strategy.
+
+**File:** ${context.fileName}
+**Source Code:**
+\`\`\`typescript
+${context.sourceCode.substring(0, 3000)}
+\`\`\`
+
+**Task:** Return JSON with:
+- \`approach\`: "unit" | "integration" | "component"
+- \`mockingStrategy\`: "minimal" | "moderate" | "extensive"
+- \`mocksNeeded\`: array
+- \`testStructure\`: string
+- \`expectedCoverage\`: number
+- \`potentialIssues\`: array
+- \`estimatedIterations\`: number
+
+Return ONLY valid JSON.`;
+
+        const result = await this.sendRequest("You are a test planning expert. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to plan test strategy', error);
+            return { approach: 'unit', mockingStrategy: 'moderate', mocksNeeded: [], testStructure: 'standard', expectedCoverage: 80, potentialIssues: [], estimatedIterations: 2 };
+        }
+    }
+
+    public async generateJestConfig(context: { projectAnalysis: any; requirements: string[]; }): Promise<any> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info('Generating Jest config');
+
+        const prompt = `Generate Jest configuration files. Return JSON with: \`configJs\`, \`setupJs\`, \`mocks\`, \`explanation\`.`;
+
+        const result = await this.sendRequest("You are a Jest expert. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to generate Jest config', error);
+            throw error;
+        }
+    }
+
+    public async planBatchGeneration(context: { allFiles: string[]; projectStructure: any; existingTests: string[]; dependencies: Record<string, string[]>; }): Promise<any> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info(`Planning batch for ${context.allFiles.length} files`);
+
+        const prompt = `Plan batch generation. Return JSON with: \`groups\`, \`estimatedTime\`, \`recommendedConcurrency\`.`;
+
+        const result = await this.sendRequest("You are a test planner. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to plan batch', error);
+            return { groups: [{ name: 'All', priority: 3, files: context.allFiles, reason: 'Sequential' }], estimatedTime: `${Math.ceil(context.allFiles.length * 45 / 60)} min`, recommendedConcurrency: 1 };
+        }
+    }
+
+    public async validateAndFixVersions(context: { suggestedVersions: Record<string, string>; validationErrors: string[]; }): Promise<Record<string, string>> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info('Validating versions');
+
+        const prompt = `Fix invalid npm versions. Return corrected JSON.`;
+
+        const result = await this.sendRequest("You are an npm expert. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to fix versions', error);
+            return context.suggestedVersions;
+        }
+    }
 }

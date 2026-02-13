@@ -27,12 +27,13 @@ const telemetryService = TelemetryService.getInstance();
  * Handle setup command - Configure Jest environment
  */
 /**
- * Handle /install command - Execute npm install with LLM-powered error resolution
+ * Handle /install command - Execute npm install with LLM-powered auto-healing
  */
 export async function handleInstallRequest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
-    installCommand?: string
+    installCommand?: string,
+    maxRetries: number = 3
 ): Promise<vscode.ChatResult> {
     const startTime = Date.now();
     telemetryService.trackCommandExecution('install');
@@ -47,119 +48,147 @@ export async function handleInstallRequest(
     const setupStatus = await setupService.checkProjectSetup(workspaceRoot);
 
     // If no command provided, get it from setupService
-    const commandToRun = installCommand || setupStatus.installCommand;
+    let currentCommand = installCommand || setupStatus.installCommand;
 
-    if (!commandToRun) {
+    if (!currentCommand) {
         stream.markdown('✅ **No hay dependencias que instalar**\n\n');
         stream.markdown('Todas las dependencias Jest ya están instaladas.\n');
         return { metadata: { command: 'install' } };
     }
 
     stream.markdown('## 📦 Instalando Dependencias Jest\n\n');
-    stream.markdown(`\`\`\`bash\n${commandToRun}\n\`\`\`\n\n`);
+    stream.markdown(`**Comando inicial:**\n\`\`\`bash\n${currentCommand}\n\`\`\`\n\n`);
 
-    // Execute npm install with real-time output streaming
-    const result = await executeNpmInstall(commandToRun, workspaceRoot, stream, token);
+    const llmProvider = LLMProviderFactory.createProvider();
+    let lastError = '';
+    let attempt = 0;
 
-    if (result.success) {
-        const duration = Date.now() - startTime;
-        stream.markdown(`\n✅ **Instalación completada exitosamente** (${(duration / 1000).toFixed(1)}s)\n\n`);
-        stream.markdown('Siguiente paso: Usa `@spfx-tester /generate-all` para generar tests.\n');
-        return { metadata: { command: 'install' } };
-    } else {
-        // Installation failed - Use LLM to analyze error and suggest fixes
+    // 🔄 Auto-healing retry loop
+    while (attempt < maxRetries) {
+        attempt++;
+        
+        if (attempt > 1) {
+            stream.markdown(`\n---\n\n### 🔄 Intento ${attempt}/${maxRetries}\n\n`);
+            stream.markdown(`\`\`\`bash\n${currentCommand}\n\`\`\`\n\n`);
+        }
+
+        // Execute npm install with real-time output streaming
+        const result = await executeNpmInstall(currentCommand, workspaceRoot, stream, token);
+
+        if (result.success) {
+            const duration = Date.now() - startTime;
+            stream.markdown(`\n✅ **Instalación completada exitosamente** (${(duration / 1000).toFixed(1)}s)\n\n`);
+            if (attempt > 1) {
+                stream.markdown(`💡 Resuelto en el intento ${attempt} mediante auto-healing con IA.\n\n`);
+            }
+            stream.markdown('Siguiente paso: Usa `@spfx-tester /generate-all` para generar tests.\n');
+            return { metadata: { command: 'install', attempts: attempt } };
+        }
+
+        // Installation failed - save error for potential manual suggestions later
+        lastError = result.error;
+
         stream.markdown(`\n❌ **Instalación fallida**\n\n`);
         
-        // Show raw error first
-        stream.markdown(`### 📋 Error de npm\n\n`);
-        const errorPreview = result.error.substring(0, 1500);
-        stream.markdown(`\`\`\`\n${errorPreview}${result.error.length > 1500 ? '\n... (truncado)' : ''}\n\`\`\`\n\n`);
+        // Show error preview
+        const errorPreview = result.error.substring(0, 800);
+        stream.markdown(`\`\`\`\n${errorPreview}${result.error.length > 800 ? '\n... (truncado)' : ''}\n\`\`\`\n\n`);
         
-        stream.markdown('🧠 Analizando el error con IA...\n\n');
+        // If we have more retries left, use LLM to auto-heal
+        if (attempt < maxRetries) {
+            stream.markdown('🧠 **Analizando error con IA y ajustando versiones...**\n\n');
+            stream.progress(`Healing attempt ${attempt}/${maxRetries}...`);
 
-        const llmProvider = LLMProviderFactory.createProvider();
-        
-        try {
-            // Simplified prompt to avoid LLM rejection
-            const pkgContext = await getPackageJsonContext(workspaceRoot);
-            const errorSummary = extractNpmErrorSummary(result.error);
-            
-            const simplePrompt = `Task: Suggest compatible npm package versions for a Jest testing setup.
+            try {
+                const pkgContext = await getPackageJsonContext(workspaceRoot);
+                const errorSummary = extractNpmErrorSummary(result.error);
+                
+                const healingPrompt = `Task: Fix npm dependency installation error by adjusting package versions.
 
 Current package.json:
 ${pkgContext}
 
-Installation error summary:
+Failed command:
+${currentCommand}
+
+Error summary:
 ${errorSummary}
 
-Please provide:
-1. Brief explanation of the version conflict
-2. A complete npm install command with specific compatible versions
+Instructions:
+1. Analyze the error (ETARGET, ERESOLVE, peer deps, etc.)
+2. Suggest a DIFFERENT command with adjusted versions or flags
+3. Be specific - provide exact version numbers that are compatible
 
-Format your response as:
-ANALISIS: [brief explanation]
-COMANDO: npm install --save-dev --legacy-peer-deps [package@version ...]`;
+Format:
+ANALISIS: [brief explanation of the issue]
+COMANDO: npm install --save-dev [adjusted-packages]`;
 
-            stream.progress('Consultando al LLM...');
-            
-            // Use generateTest as a generic LLM query method
-            const llmResult = await llmProvider.generateTest({
-                sourceCode: simplePrompt,
-                fileName: 'npm-error-analysis.txt',
-                systemPrompt: 'You are a helpful npm dependency resolution assistant. Analyze package version conflicts and suggest compatible versions for Jest testing libraries.'
-            });
-
-            // Check if LLM refused to answer
-            if (llmResult.code.toLowerCase().includes("sorry") && llmResult.code.toLowerCase().includes("can't assist")) {
-                stream.markdown('⚠️ **El LLM rechazó la solicitud de análisis**\n\n');
-                stream.markdown('Esto puede ocurrir por políticas de seguridad del modelo.\n\n');
-                suggestManualFix(stream, result.error, commandToRun);
-                return { errorDetails: { message: 'npm install failed' } };
-            }
-
-            // Try to extract structured response
-            let analysis = extractSection(llmResult.code, 'ANALISIS');
-            let suggestedCommand = extractSection(llmResult.code, 'COMANDO');
-            
-            // Fallback: if no structured response, show full LLM output and try to extract command
-            if (!analysis && !suggestedCommand) {
-                stream.markdown(`### 🧠 Análisis del LLM\n\n${llmResult.code}\n\n`);
-                
-                // Try to find npm install command in the response
-                const npmMatch = llmResult.code.match(/npm\s+install[^\n]+/);
-                if (npmMatch) {
-                    suggestedCommand = npmMatch[0];
-                }
-            }
-            
-            if (analysis) {
-                stream.markdown(`### 🔍 Análisis del Error\n\n${analysis}\n\n`);
-            }
-
-            if (suggestedCommand) {
-                const cleanCommand = suggestedCommand.replace(/```[\w]*\n?|```/g, '').trim();
-                stream.markdown(`### 💡 Comando Sugerido\n\n\`\`\`bash\n${cleanCommand}\n\`\`\`\n\n`);
-                
-                // Offer to retry with suggested command
-                stream.button({
-                    command: 'spfx-test-agent.installWithCommand',
-                    arguments: [cleanCommand],
-                    title: '🔄 Reintentar con versiones sugeridas'
+                const llmResult = await llmProvider.generateTest({
+                    sourceCode: healingPrompt,
+                    fileName: 'npm-healing-analysis.txt',
+                    systemPrompt: 'You are an expert npm dependency resolver. Analyze installation errors and provide alternative commands with compatible versions.'
                 });
-                stream.markdown('\n\n');
-            } else {
-                suggestManualFix(stream, result.error, commandToRun);
+
+                // Check if LLM refused
+                if (llmResult.code.toLowerCase().includes("sorry") && llmResult.code.toLowerCase().includes("can't assist")) {
+                    stream.markdown('⚠️ **El LLM rechazó la solicitud** - abortando auto-healing.\n\n');
+                    break; // Exit retry loop
+                }
+
+                // Extract analysis and suggested command
+                const analysis = extractSection(llmResult.code, 'ANALISIS');
+                let suggestedCommand = extractSection(llmResult.code, 'COMANDO');
+                
+                // Fallback: try to extract npm command from full response
+                if (!suggestedCommand) {
+                    const npmMatch = llmResult.code.match(/npm\s+install[^\n]+/);
+                    if (npmMatch) {
+                        suggestedCommand = npmMatch[0];
+                    }
+                }
+                
+                if (analysis) {
+                    stream.markdown(`**Diagnóstico IA:** ${analysis}\n\n`);
+                }
+
+                if (suggestedCommand) {
+                    const cleanCommand = suggestedCommand.replace(/```[\w]*\n?|```/g, '').trim();
+                    
+                    // Verify the command is actually different (avoid infinite loops)
+                    if (cleanCommand === currentCommand) {
+                        stream.markdown('⚠️ **El LLM sugirió el mismo comando** - no hay mejora posible.\n\n');
+                        break; // Exit retry loop
+                    }
+                    
+                    // Update command for next iteration
+                    currentCommand = cleanCommand;
+                    stream.markdown(`💡 **Nuevo comando detectado** - reintentando automáticamente...\n\n`);
+                    
+                    // Small delay to avoid rate limits
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    continue; // Retry with new command
+                } else {
+                    stream.markdown('⚠️ **El LLM no pudo generar un comando alternativo**\n\n');
+                    break; // Exit retry loop
+                }
+
+            } catch (llmError) {
+                logger.error('LLM healing failed', llmError);
+                stream.markdown(`⚠️ **Error en auto-healing:** ${llmError instanceof Error ? llmError.message : 'Unknown'}\n\n`);
+                break; // Exit retry loop on LLM errors
             }
-
-        } catch (llmError) {
-            logger.error('LLM analysis failed', llmError);
-            stream.markdown('⚠️ El análisis automático con IA falló.\n\n');
-            stream.markdown(`**Error del LLM:** ${llmError instanceof Error ? llmError.message : 'Unknown'}\n\n`);
-            suggestManualFix(stream, result.error, commandToRun);
         }
-
-        return { errorDetails: { message: 'npm install failed' } };
     }
+
+    // All retries exhausted or LLM couldn't help - show manual suggestions
+    stream.markdown(`\n---\n\n### ⚠️ Auto-healing agotado\n\n`);
+    stream.markdown(`No se pudo resolver automáticamente después de ${attempt} intento(s).\n\n`);
+    suggestManualFix(stream, lastError, currentCommand);
+
+    return { 
+        metadata: { command: 'install', attempts: attempt },
+        errorDetails: { message: 'npm install failed after retries' } 
+    };
 }
 
 /**
@@ -290,33 +319,50 @@ function suggestManualFix(stream: vscode.ChatResponseStream, error: string, orig
     // Analyze error type and give specific advice
     if (error.includes('ETARGET') || error.includes('notarget')) {
         stream.markdown('**Error ETARGET/notarget:** No se encontró la versión especificada.\n\n');
+        stream.markdown('Causas comunes:\n');
+        stream.markdown('- Las versiones exactas especificadas ya no existen en npm\n');
+        stream.markdown('- El registro npm está temporalmente inaccesible\n');
+        stream.markdown('- El rango de versión es demasiado restrictivo\n\n');
         stream.markdown('Soluciones:\n');
-        stream.markdown('1. Usa versiones con rango flexible: `@types/jest@^28.0.0` en lugar de `@28.0.8`\n');
-        stream.markdown('2. Verifica versiones disponibles: `npm view <package> versions`\n');
-        stream.markdown('3. Prueba con versión latest: `npm install --save-dev <package>@latest`\n\n');
+        stream.markdown('1. **Usa versiones más flexibles:** Cambia rangos estrictos como `@28.0.8` por `@^28.0.0`\n');
+        stream.markdown('2. **Verifica versiones disponibles:** `npm view <package> versions`\n');
+        stream.markdown('3. **Prueba con latest:** `npm install --save-dev <package>@latest`\n');
+        stream.markdown('4. **Instala sin especificar versión:** deja que npm elija la compatible\n\n');
     } else if (error.includes('ERESOLVE') || error.includes('peer dep')) {
         stream.markdown('**Error ERESOLVE/peer dependency:** Conflicto de versiones entre paquetes.\n\n');
         stream.markdown('Soluciones:\n');
-        stream.markdown('1. Usa `--force` si `--legacy-peer-deps` no funciona\n');
-        stream.markdown('2. Revisa qué versión de React/TypeScript tienes instalada\n');
-        stream.markdown('3. Instala las dependencias que coincidan con tu versión de React\n\n');
+        stream.markdown('1. Usa `--force` en lugar de `--legacy-peer-deps`\n');
+        stream.markdown('2. Revisa qué versión de React/TypeScript tienes instalada con `npm list react typescript`\n');
+        stream.markdown('3. Actualiza React primero si es muy antigua: `npm update react react-dom`\n');
+        stream.markdown('4. Instala dependencias de testing que coincidan con tu versión de React\n\n');
     } else {
         stream.markdown('Soluciones generales:\n');
         stream.markdown('- Revisa el error completo arriba para identificar el paquete problemático\n');
-        stream.markdown('- Intenta instalar los paquetes uno por uno para identificar el conflicto\n');
-        stream.markdown('- Verifica las versiones compatibles en npmjs.com\n\n');
+        stream.markdown('- Intenta instalar los paquetes uno por uno para aislar el conflicto\n');
+        stream.markdown('- Verifica compatibilidad en [npmjs.com](https://npmjs.com)\n');
+        stream.markdown('- Limpia cache de npm: `npm cache clean --force`\n\n');
     }
     
-    // Suggest alternative commands
-    stream.markdown('**Comandos alternativos a probar:**\n\n');
+    // Suggest modifications to the ORIGINAL command (not hardcoded alternatives)
+    stream.markdown('**Comandos alternativos basados en tu comando original:**\n\n');
     
-    if (!originalCommand.includes('--force')) {
+    // Option 1: Try with --force instead of --legacy-peer-deps
+    if (originalCommand.includes('--legacy-peer-deps') && !originalCommand.includes('--force')) {
         const forceCommand = originalCommand.replace('--legacy-peer-deps', '--force');
+        stream.markdown('**Opción 1:** Usar `--force` en lugar de `--legacy-peer-deps`:\n');
         stream.markdown(`\`\`\`bash\n${forceCommand}\n\`\`\`\n\n`);
     }
     
-    stream.markdown('O instala Jest 28 compatible con tu proyecto:\n');
-    stream.markdown('```bash\nnpm install --save-dev --legacy-peer-deps jest@^28.0.0 @types/jest@^28.0.0 ts-jest@^28.0.0\n```\n\n');
+    // Option 2: Install without version specifiers (let npm resolve)
+    stream.markdown('**Opción 2:** Dejar que npm elija versiones compatibles automáticamente:\n');
+    stream.markdown('```bash\nnpm install --save-dev --legacy-peer-deps jest @types/jest ts-jest @testing-library/react @testing-library/jest-dom\n```\n');
+    stream.markdown('*(npm elegirá las versiones más recientes compatibles con tus dependencias)*\n\n');
+    
+    // Option 3: Manual steps
+    stream.markdown('**Opción 3:** Instalar paquetes esenciales uno a uno:\n');
+    stream.markdown('```bash\n# Instala jest primero\nnpm install --save-dev --legacy-peer-deps jest\n\n# Luego los paquetes de TypeScript\nnpm install --save-dev --legacy-peer-deps @types/jest ts-jest\n\n# Finalmente testing-library\nnpm install --save-dev --legacy-peer-deps @testing-library/react @testing-library/jest-dom\n```\n\n');
+    
+    stream.markdown('💡 **Tip:** Si todo falla, considera actualizar las dependencias principales primero (`npm update`) antes de instalar Jest.\n\n');
 }
 
 export async function handleSetupRequest(

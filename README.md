@@ -1,37 +1,131 @@
-# SPFX Test Agent - Ingeniero de QA Autónomo para SharePoint
+# SPFX Test Agent - Ingeniero de QA Autónomo con Arquitectura LLM-First
 
 **SPFX Test Agent** es una extensión revolucionaria para Visual Studio Code que transforma tu flujo de trabajo de desarrollo en SharePoint Framework.
 
-No es un simple asistente de chat — es un **agente autónomo inteligente** que actúa como un ingeniero de QA senior. Entiende la arquitectura de tu proyecto, analiza las dependencias de tus archivos, genera pruebas unitarias robustas en Jest y **se auto-repara** cuando algo falla.
+No es un simple asistente de chat — es un **agente autónomo inteligente** que actúa como un ingeniero de QA senior. La extensión funciona como un **orquestador puro** donde el LLM analiza, decide, ejecuta, valida y reitera de forma completamente autónoma.
 
-## 🚀 Novedades en v0.4.26 (Actual)
+## 🚀 Novedades en v0.5.1 — **Arquitectura LLM-First Completa**
 
-### 🧠 Inteligencia Contextual Profunda (Nuevo)
-El agente ya no "adivina" los mocks. Ahora lee y entiende tu proyecto completo:
-- **Análisis de Dependencias**: Lee los archivos importados para entender interfaces y tipos reales (`SourceContextCollector`).
-- **Detección de Patrones SPFx**: Identifica automáticamente si es un WebPart, una Extensión, o usa PnP JS / Fluent UI.
-- **Contexto de Configuración**: Lee tu `tsconfig.json` y `package.json` para adaptar los tests a tu entorno exacto.
+### 🧠 **Transformación Fundamental**
+La versión 0.5.0 representa una **refactorización arquitectónica total**. La extensión ya no contiene lógica hardcoded para decisiones críticas — **el LLM decide todo**.
 
-### 🔧 Auto-Reparación de Infraestructura (Nuevo)
-El agente distingue entre "tu código está mal" y "tu entorno está mal configured":
-- **Fix Automático de JSDOM**: Detecta errores comunes como `getVmContext` y corrige versiones de `jest-environment-jsdom` automáticamente.
-- **Gestión de Versiones**: Sugiere e instala versiones de librerías compatibles con tu versión de SPFx (soporte para SPFx 1.14 - 1.18+).
+### ✨ **Nuevas Capacidades LLM-First**
 
-### 🤖 Soporte Multi-Proveedor LLM
-- **GitHub Copilot**: Integración nativa sin configuración extra.
-- **Azure OpenAI**: (Nuevo) Puedes configurar tu propio endpoint de Azure OpenAI si prefieres usar tus modelos corporativos.
+#### 1. **Planificación Inteligente de Estrategia de Testing**
+Antes de generar cualquier test, el LLM analiza tu código y decide:
+- **Enfoque óptimo**: Unit / Integration / Component testing
+- **Estrategia de mocking**: Minimal / Moderate / Extensive
+- **Mocks específicos necesarios** para tu archivo
+- **Cobertura esperada** y posibles problemas
+- **Iteraciones de auto-reparación estimadas**
+
+```text
+🧠 Test Strategy Planned by LLM:
+- Approach: component
+- Mocking: moderate  
+- Mocks needed: SPHttpClient, @microsoft/sp-core-library
+- Est. iterations: 2
+```
+
+#### 2. **Configuración Jest Personalizada por LLM**
+El comando `/setup` ya no usa templates hardcoded:
+- **Analiza** tu `package.json`, `tsconfig.json`, y tests existentes
+- **Detecta** automáticamente tu framework (SPFx, React, Angular, Next.js...)
+- **Genera** una configuración Jest optimizada específicamente para tu proyecto
+- **Crea** mocks personalizados según tus dependencias reales
+
+#### 3. **Priorización Inteligente de Batch Generation**
+El comando `/generate-all` ahora usa el LLM para decidir:
+- **Qué archivos procesar primero** (críticos/fundacionales antes)
+- **Cómo agruparlos** según dependencias y complejidad
+- **Tiempo estimado** y concurrencia recomendada
+
+```text
+🧠 Batch Generation Plan (by LLM):
+**Core Services** (Priority 1): 5 files
+  _Foundation services used by other components_
+
+**React Components** (Priority 2): 12 files  
+  _UI components depending on services_
+  
+Estimated time: 8-12 minutes
+Recommended concurrency: 2
+```
+
+#### 4. **Detección de Dependencias Sin Versiones Hardcoded**
+**BREAKING CHANGE**: Eliminadas todas las versiones hardcoded de Jest y dependencias.
+- El LLM detecta versiones compatibles dinámicamente
+- 3 reintentos con feedback si falla
+- Fallback a npm `"latest"` (NO versiones hardcoded)
+
+---
+
+## 🏗️ **Filosofía: LLM-First Architecture**
+
+### **¿Qué significa LLM-First?**
+
+La extensión es un **orquestador puro** — toda la lógica estratégica reside en el LLM:
+
+**Antes (v0.4.x):**
+```typescript
+// ❌ Lógica hardcoded
+const jestVersion = "^29.7.0"; // Versión fija
+const config = DEFAULT_JEST_CONFIG; // Template fijo
+processFiles(files); // Orden arbitrario
+```
+
+**Ahora (v0.5.x):**
+```typescript
+// ✅ LLM decide todo
+const versions = await llm.detectDependencies(pkg); // Dinámico
+const config = await llm.generateJestConfig(analysis); // Personalizado
+const plan = await llm.planBatchGeneration(files); // Priorizado
+const strategy = await llm.planTestStrategy(code); // Analizado
+```
+
+### **Flujo LLM-First:**
+1. **ANALIZA** → LLM examina tu proyecto completo
+2. **PLANIFICA** → LLM decide estrategia óptima
+3. **EJECUTA** → Extension ejecuta el plan
+4. **VALIDA** → LLM evalúa resultados
+5. **REITERA** → LLM decide si repetir/ajustar
+
+**Resultado**: Cero asunciones. Todo adaptado a TU proyecto específico.
+
+---
 
 ## Características Principales
 
-### 🔄 Ciclo de Vida Autónomo
-1. **Analiza**: Lee tu código fuente y navega por sus importaciones.
-2. **Genera**: Escribe un test completo usando patrones de mocking específicos para SPFx.
-3. **Ejecuta**: Lanza Jest en un proceso aislado solo para ese archivo.
-4. **Repara**: Si falla, analiza el error, lee el código del test actual y aplica correcciones (hasta 3/5 intentos según modo).
+### 🔄 Ciclo de Vida Completamente Autónomo (LLM-First)
+1. **Planifica** → LLM analiza código y define estrategia antes de generar
+2. **Genera** → LLM escribe test siguiendo la estrategia planificada
+3. **Ejecuta** → Jest corre el test en entorno aislado
+4. **Analiza** → LLM diagnostica errores con contexto completo
+5. **Repara** → LLM reescribe el test con correcciones específicas
+6. **Reitera** → Hasta 3/5 veces según modo (fast/balanced/thorough)
 
-### 🛡️ Entorno Robusto
-- **Setup Inteligente**: El comando `/setup` no solo instala paquetes, sino que configura `jest.config.js`, `jest.setup.js` y scripts de `package.json` optimizados para SharePoint.
-- **Limpieza de Ruido**: Los logs de Jest son procesados para que el LLM se enfoque solo en el error real, ignorando ruido de consola.
+### 🛡️ Configuración Inteligente y Personalizada
+- **Setup por LLM**: `/setup` genera `jest.config.js` optimizado para TU proyecto
+- **Detección de Framework**: SPFx, React, Angular, Next.js, Vue identificados automáticamente
+- **Mocks Personalizados**: Crea mocks específicos según tus dependencias reales
+- **Scripts Optimizados**: Actualiza `package.json` con comandos Jest apropiados
+
+### 🧠 Inteligencia Contextual Profunda
+- **Análisis de Dependencias**: Lee archivos importados para entender tipos e interfaces reales
+- **Detección de Patrones**: Identifica automáticamente WebParts, Extensiones, PnP JS, Fluent UI
+- **Contexto de Configuración**: Interpreta `tsconfig.json` y `package.json` para adaptar tests
+- **Patrones Existentes**: Aprende de tus tests actuales para mantener consistencia
+
+### 🚀 Generación en Batch Inteligente
+- **Priorización por LLM**: `/generate-all` procesa archivos en orden óptimo
+- **Agrupación Inteligente**: Agrupa por dependencias y complejidad
+- **Estimación de Tiempo**: Calcula duración y recomienda concurrencia
+- **Coverage-Driven**: Itera automáticamente sobre archivos con baja cobertura
+
+### 🤖 Soporte Multi-Proveedor LLM
+- **GitHub Copilot**: Integración nativa sin configuración (GPT-4 Turbo)
+- **Azure OpenAI**: Configura tu propio endpoint para modelos corporativos
+- **Fallback Graceful**: Degrada elegantemente a defaults si LLM no disponible
 
 ## Instalación y Requisitos
 

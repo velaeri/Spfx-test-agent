@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { TestRunner } from '../utils/TestRunner';
 import { JestLogParser } from '../utils/JestLogParser';
-import { ILLMProvider } from '../interfaces/ILLMProvider';
+import { ILLMProvider, ProjectAnalysis, TestStrategy } from '../interfaces/ILLMProvider';
 import { CopilotProvider } from '../providers/CopilotProvider';
 import { AzureOpenAIProvider } from '../providers/AzureOpenAIProvider';
 import { Logger } from '../services/Logger';
@@ -168,6 +168,42 @@ export class TestAgent {
         const testFilePath = this.getTestFilePath(sourceFilePath, config.testFilePattern);
         
         this.logger.info(`Test file will be created at: ${testFilePath}`);
+        
+        // 🧠 LLM-FIRST: Plan test strategy before generating
+        let testStrategy: TestStrategy | undefined;
+        try {
+            stream.progress('Analyzing source code and planning test strategy...');
+            const projectAnalysis = await this.buildProjectAnalysis(workspaceRoot);
+            
+            testStrategy = await this.llmProvider.planTestStrategy({
+                sourceCode,
+                fileName: sourceFileName,
+                projectAnalysis,
+                existingTestPatterns: await this.findExistingTestPatterns(workspaceRoot)
+            });
+            
+            // Show strategy to user
+            stream.markdown(`\n🧠 **Test Strategy Planned by LLM:**\n\n`);
+            stream.markdown(`- **Approach:** ${testStrategy.approach}\n`);
+            stream.markdown(`- **Mocking:** ${testStrategy.mockingStrategy}\n`);
+            if (testStrategy.mocksNeeded.length > 0) {
+                stream.markdown(`- **Mocks needed:** ${testStrategy.mocksNeeded.slice(0, 3).join(', ')}${testStrategy.mocksNeeded.length > 3 ? '...' : ''}\n`);
+            }
+            if (testStrategy.potentialIssues.length > 0) {
+                stream.markdown(`- **Potential issues:** ${testStrategy.potentialIssues[0]}\n`);
+            }
+            stream.markdown(`- **Est. iterations:** ${testStrategy.estimatedIterations}\n\n`);
+            
+            this.logger.info('Test strategy planned', {
+                approach: testStrategy.approach,
+                mockingStrategy: testStrategy.mockingStrategy,
+                mocksCount: testStrategy.mocksNeeded.length
+            });
+        } catch (error) {
+            this.logger.warn('Failed to plan test strategy, proceeding without it', error);
+            stream.markdown(`⚠️ Could not plan strategy (LLM error), proceeding with default approach\n\n`);
+        }
+        
         stream.progress('Generating initial test...');
 
         // Attempt 1: Generate initial test
@@ -212,7 +248,15 @@ export class TestAgent {
             
             // Parse and clean the error output
             const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
-            errorPatterns.push(cleanedError.substring(0, 200)); // Store first 200 chars
+            
+            // CRITICAL: If cleaned error is empty/short, use raw output
+            const errorToSend = (cleanedError && cleanedError.length > 50) 
+                ? cleanedError 
+                : testResult.output.substring(0, 3000); // Use raw output if cleaning failed
+            
+            this.logger.info(`Test failed (attempt ${attempt}), error length: ${testResult.output.length} chars, cleaned: ${cleanedError.length} chars`);
+            
+            errorPatterns.push(errorToSend.substring(0, 200)); // Store first 200 chars
             const summary = JestLogParser.extractTestSummary(testResult.output);
             
             this.telemetryService.trackHealingAttempt(attempt, 'JestTestFailure');
@@ -229,12 +273,12 @@ export class TestAgent {
                     ? fs.readFileSync(testFilePath, 'utf-8') 
                     : '';
 
-                // Ask LLM to fix the test
+                // Ask LLM to fix the test - use errorToSend which has fallback to raw output
                 result = await this.llmProvider.fixTest({
                     sourceCode,
                     fileName: sourceFileName,
                     currentTestCode,
-                    errorContext: cleanedError,
+                    errorContext: errorToSend, // Use the error with fallback logic
                     dependencyContext,
                     systemPrompt,
                     attempt,
@@ -299,9 +343,20 @@ export class TestAgent {
         } else {
             stream.markdown(`❌ **Test still failing after ${config.maxHealingAttempts} attempts.** (${(duration / 1000).toFixed(1)}s)\n\n`);
             stream.markdown('Consider reviewing the generated test manually.\n\n');
+            
+            // Show error to user - with fallback to raw output
             const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
-            stream.markdown('```\n' + cleanedError + '\n```\n\n');
-            this.logger.warn('Test generation failed', { attempts: attempt, duration });
+            const errorToShow = (cleanedError && cleanedError.length > 20)
+                ? cleanedError
+                : testResult.output.substring(0, 2000); // Show raw output if cleaning failed
+            
+            stream.markdown('```\n' + errorToShow + '\n```\n\n');
+            this.logger.warn('Test generation failed', { 
+                attempts: attempt, 
+                duration,
+                outputLength: testResult.output.length,
+                cleanedLength: cleanedError.length
+            });
             
             this.telemetryService.trackError('TestGenerationError', 'generation');
             
@@ -378,5 +433,130 @@ export class TestAgent {
      */
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Build project analysis for LLM planning
+     */
+    private async buildProjectAnalysis(projectRoot: string): Promise<ProjectAnalysis> {
+        const packageJsonPath = path.join(projectRoot, 'package.json');
+        const tsConfigPath = path.join(projectRoot, 'tsconfig.json');
+        
+        let packageJson: any = {};
+        let tsConfig: any = undefined;
+        let existingJestConfig: string | undefined;
+        
+        // Read package.json
+        if (fs.existsSync(packageJsonPath)) {
+            packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        }
+        
+        // Read tsconfig.json
+        if (fs.existsSync(tsConfigPath)) {
+            tsConfig = JSON.parse(fs.readFileSync(tsConfigPath, 'utf-8'));
+        }
+        
+        // Read existing jest config if present
+        const configFiles = ['jest.config.js', 'jest.config.ts', 'jest.config.json'];
+        for (const file of configFiles) {
+            const configPath = path.join(projectRoot, file);
+            if (fs.existsSync(configPath)) {
+                existingJestConfig = fs.readFileSync(configPath, 'utf-8');
+                break;
+            }
+        }
+        
+        // Find existing test files
+        const existingTests: string[] = [];
+        const srcDir = path.join(projectRoot, 'src');
+        if (fs.existsSync(srcDir)) {
+            this.findTestFiles(srcDir, existingTests);
+        }
+        
+        return {
+            packageJson,
+            tsConfig,
+            existingJestConfig,
+            existingTests: existingTests.map(f => path.basename(f)),
+            dependencies: packageJson.dependencies || {},
+            devDependencies: packageJson.devDependencies || {},
+            framework: this.detectFramework(packageJson),
+            reactVersion: packageJson.dependencies?.react || packageJson.devDependencies?.react,
+            nodeVersion: packageJson.engines?.node
+        };
+    }
+
+    private findTestFiles(dir: string, results: string[]): void {
+        if (results.length >= 10) return; // Limit to 10 examples
+        
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (results.length >= 10) break;
+                
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory() && entry.name !== 'node_modules') {
+                    this.findTestFiles(fullPath, results);
+                } else if (entry.name.match(/\.(test|spec)\.(ts|tsx|js|jsx)$/)) {
+                    results.push(fullPath);
+                }
+            }
+        } catch (error) {
+            // Ignore read errors
+        }
+    }
+
+    private detectFramework(packageJson: any): string {
+        const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+        
+        if (deps['@microsoft/sp-core-library']) return 'spfx';
+        if (deps['@angular/core']) return 'angular';
+        if (deps['next']) return 'next';
+        if (deps['react']) return 'react';
+        if (deps['vue']) return 'vue';
+        if (deps['@types/vscode']) return 'vscode-extension';
+        
+        return 'unknown';
+    }
+
+    private async findExistingTestPatterns(projectRoot: string): Promise<string[]> {
+        const patterns: string[] = [];
+        const srcDir = path.join(projectRoot, 'src');
+        
+        if (!fs.existsSync(srcDir)) {
+            return patterns;
+        }
+        
+        const testFiles: string[] = [];
+        this.findTestFiles(srcDir, testFiles);
+        
+        // Extract patterns from first 3 test files
+        for (const testFile of testFiles.slice(0, 3)) {
+            try {
+                const content = fs.readFileSync(testFile, 'utf-8');
+                // Extract key patterns: describe blocks, it blocks, common setup
+                const describeBlocks = content.match(/describe\(['"](.*?)['"]/g);
+                const itBlocks = content.match(/it\(['"](.*?)['"]/g);
+                
+                if (describeBlocks && describeBlocks.length > 0) {
+                    patterns.push(describeBlocks[0]);
+                }
+                if (itBlocks && itBlocks.length > 0) {
+                    patterns.push(itBlocks[0]);
+                }
+                
+                // Check for common setup patterns
+                if (content.includes('beforeEach')) {
+                    patterns.push('Uses beforeEach setup');
+                }
+                if (content.includes('jest.mock')) {
+                    patterns.push('Uses jest.mock for dependencies');
+                }
+            } catch (error) {
+                // Ignore read errors
+            }
+        }
+        
+        return patterns.slice(0, 5); // Return max 5 patterns
     }
 }

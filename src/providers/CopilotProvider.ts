@@ -129,49 +129,24 @@ export class CopilotProvider implements ILLMProvider {
         commands?: string[];
         configChanges?: Record<string, any>;
     }> {
-        const systemPrompt = `You are an expert in Node.js dependency management, TypeScript compilation, and Jest testing in SharePoint Framework (SPFx) projects.
+        const systemPrompt = `You are an expert in Node.js dependency management, TypeScript compilation, and Jest testing.
 
 Your task is to analyze errors and provide CONCRETE, ACTIONABLE solutions.
 
-RULES:
-1. Identify version conflicts between packages
-2. Consider React version compatibility with testing libraries
-3. Check Jest version compatibility with ts-jest and jest-environment-jsdom
-4. For SPFx projects, respect the existing React version (usually 17.x or 18.x)
-5. Return ONLY valid JSON in the specified format`;
+Return ONLY valid JSON in the specified format - no markdown, no explanations outside the JSON.`;
 
         const deps = {
             ...projectContext.packageJson.dependencies || {},
             ...projectContext.packageJson.devDependencies || {}
         };
 
-        const userPrompt = `**Error Type:** ${projectContext.errorType}
-
-**Error Output:**
-\`\`\`
-${error}
-\`\`\`
-
-**Current Dependencies:**
-\`\`\`json
-${JSON.stringify(deps, null, 2)}
-\`\`\`
-
-${projectContext.nodeVersion ? `**Node Version:** ${projectContext.nodeVersion}\n` : ''}
-${projectContext.jestConfig ? `**Jest Config:**\n\`\`\`javascript\n${projectContext.jestConfig}\n\`\`\`\n` : ''}
-
-**Task:**
-Analyze this error and provide a solution. Return ONLY a JSON object with this structure:
-\`\`\`json
-{
-  "diagnosis": "Brief explanation of what's wrong",
-  "packages": ["package1@version", "package2@version"],
-  "commands": ["optional shell commands if needed"],
-  "configChanges": { "optional": "config updates" }
-}
-\`\`\`
-
-If no packages need installing, use empty array. If no commands needed, omit the field.`;
+        const userPrompt = PROMPTS.ANALYZE_ERROR(
+            error,
+            projectContext.errorType,
+            deps,
+            projectContext.nodeVersion,
+            projectContext.jestConfig
+        );
 
         try {
             const result = await this.sendRequest(systemPrompt, userPrompt);
@@ -374,40 +349,42 @@ If no packages need installing, use empty array. If no commands needed, omit the
 
         let retryGuidance = '';
         if (previousAttempt) {
-            retryGuidance = `\n\n**PREVIOUS ATTEMPT ${previousAttempt.attemptNumber} FAILED:**
+            retryGuidance = `\n\n🚨 **PREVIOUS ATTEMPT ${previousAttempt.attemptNumber} FAILED:**
+\`\`\`
 ${previousAttempt.error}
+\`\`\`
 
-Please suggest DIFFERENT versions that avoid this error. Verify versions exist in npm registry.`;
+**This means npm could not find those versions. You MUST:**
+- Suggest DIFFERENT versions that ACTUALLY exist in npm
+- Use "latest" if uncertain about specific version numbers
+- Ensure Jest ecosystem compatibility`;
         }
 
-        const prompt = `Analyze this package.json and determine which Jest testing dependencies are missing or need to be installed.
+        const prompt = `🔍 Detect missing Jest dependencies with VALID npm versions
 
-**Current package.json dependencies:**
+**package.json:**
 \`\`\`json
 ${JSON.stringify({
     dependencies: packageJsonContent.dependencies || {},
     devDependencies: packageJsonContent.devDependencies || {}
 }, null, 2)}
+\`\`\`${retryGuidance}
+
+**CRITICAL RULES:**
+❌ DO NOT suggest fictional versions
+✅ USE "latest" if uncertain
+✅ Ensure jest@29.x → ts-jest@29.x, @types/jest@29.x alignment
+✅ Use caret ranges (^) for flexibility
+
+**Required packages:**
+jest, @types/jest, ts-jest, @testing-library/react, @testing-library/jest-dom, react-test-renderer, @types/react-test-renderer, identity-obj-proxy
+
+**Return ONLY JSON:**
+\`\`\`json
+{"package": "^X.Y.Z" or "latest"}
 \`\`\`
 
-**Task:** 
-1. Analyze the EXISTING dependencies to determine what Jest packages are already installed
-2. Determine what ADDITIONAL packages (if any) are needed for a complete Jest + React Testing Library setup
-3. For any missing packages, recommend versions that are COMPATIBLE with the existing dependencies
-4. IMPORTANT: Only suggest versions that ACTUALLY EXIST in npm registry${retryGuidance}
-
-**Required packages for full Jest + React Testing Library:**
-- jest
-- @types/jest  
-- ts-jest
-- @testing-library/react
-- @testing-library/jest-dom
-- @testing-library/user-event
-- react-test-renderer
-- @types/react-test-renderer
-- identity-obj-proxy
-
-Return ONLY a JSON object mapping package names to their recommended version strings (e.g. {"jest": "^29.0.0"}). If everything is already installed, return an empty object {}. No markdown, no explanations outside the JSON block.`;
+If all installed, return: \`{}\``;
 
         try {
             const systemPrompt = "You are a dependency management assistant. You return only JSON with valid npm versions.";
@@ -451,33 +428,12 @@ Return ONLY a JSON object mapping package names to their recommended version str
     }): Promise<any> {
         this.logger.info(`Planning test strategy for ${context.fileName}`);
 
-        const patternsContext = context.existingTestPatterns && context.existingTestPatterns.length > 0
-            ? `\n\n**Successful patterns from previous tests:**\n${context.existingTestPatterns.slice(0, 3).join('\n\n')}`
-            : '';
-
-        const prompt = `Analyze this source file and plan an optimal testing strategy.
-
-**File:** ${context.fileName}
-**Source Code:**
-\`\`\`typescript
-${context.sourceCode.substring(0, 3000)}
-\`\`\`
-
-**Project Context:**
-- Framework: ${context.projectAnalysis.framework || 'Unknown'}
-- React Version: ${context.projectAnalysis.reactVersion || 'Unknown'}
-- Existing tests: ${context.projectAnalysis.existingTests?.length || 0} files${patternsContext}
-
-**Task:** Analyze and return a JSON strategy with:
-- \`approach\`: "unit" | "integration" | "component"
-- \`mockingStrategy\`: "minimal" | "moderate" | "extensive"
-- \`mocksNeeded\`: array of items to mock (e.g., ["SPHttpClient", "WebPartContext"])
-- \`testStructure\`: description (e.g., "describe block with 5 test cases")
-- \`expectedCoverage\`: number (e.g., 85)
-- \`potentialIssues\`: array of potential problems (e.g., ["SharePoint context needs mocking"])
-- \`estimatedIterations\`: number of expected fix attempts (1-3)
-
-Return ONLY valid JSON, no markdown or explanations.`;
+        const prompt = PROMPTS.PLAN_TEST_STRATEGY(
+            context.sourceCode,
+            context.fileName,
+            context.projectAnalysis,
+            context.existingTestPatterns
+        );
 
         try {
             const response = await this.sendRequest(
@@ -510,23 +466,10 @@ Return ONLY valid JSON, no markdown or explanations.`;
     }): Promise<any> {
         this.logger.info('Generating personalized Jest config');
 
-        const prompt = `Generate a custom Jest configuration for this project.
-
-**Project Analysis:**
-\`\`\`json
-${JSON.stringify(context.projectAnalysis, null, 2)}
-\`\`\`
-
-**Requirements:**
-${context.requirements.map((r, i) => `${i + 1}. ${r}`).join('\n')}
-
-**Task:** Generate configuration files and return JSON with:
-- \`configJs\`: Full jest.config.js content
-- \`setupJs\`: Full jest.setup.js content
-- \`mocks\`: Object mapping mock file paths to their content
-- \`explanation\`: Brief explanation of key configuration choices
-
-Return ONLY valid JSON.`;
+        const prompt = PROMPTS.GENERATE_JEST_CONFIG(
+            context.projectAnalysis,
+            context.requirements
+        );
 
         try {
             const response = await this.sendRequest(
@@ -552,25 +495,12 @@ Return ONLY valid JSON.`;
     }): Promise<any> {
         this.logger.info(`Planning batch generation for ${context.allFiles.length} files`);
 
-        const prompt = `Plan an optimal batch test generation strategy.
-
-**Files to test:** ${context.allFiles.length} files
-**Sample files:**
-${context.allFiles.slice(0, 10).map(f => `  - ${f}`).join('\n')}
-${context.allFiles.length > 10 ? `  ... and ${context.allFiles.length - 10} more` : ''}
-
-**Existing tests:** ${context.existingTests.length}
-**Project structure:** ${JSON.stringify(context.projectStructure, null, 2).substring(0, 500)}
-
-**Task:** Create a batch generation plan with:
-- \`groups\`: Array of {name, priority(1-5), files[], reason}
-  - Priority 1 = most critical (core business logic, APIs, services)
-  - Priority 5 = least critical (utilities, constants, types)
-  - Group related files together (a service + its models)
-- \`estimatedTime\`: Human-readable time estimate (e.g., "15 minutes")
-- \`recommendedConcurrency\`: Number of files to process in parallel (1-5)
-
-Return ONLY valid JSON.`;
+        const prompt = PROMPTS.PLAN_BATCH_GENERATION(
+            context.allFiles,
+            context.projectStructure,
+            context.existingTests,
+            context.dependencies
+        );
 
         try {
             const response = await this.sendRequest(
@@ -602,32 +532,97 @@ Return ONLY valid JSON.`;
         suggestedVersions: Record<string, string>;
         validationErrors: string[];
     }): Promise<Record<string, string>> {
-        this.logger.info('Validating and fixing package versions');
+        this.logger.info('Validating and fixing package versions with LLM reasoning');
 
-        const prompt = `Fix package versions that don't exist in npm registry.
+        const prompt = `🔍 CRITICAL TASK: Fix npm package versions that don't exist in registry
 
-**Suggested versions (some are invalid):**
+**Context:**
+- You suggested versions that npm cannot find
+- You MUST provide versions that ACTUALLY EXIST in npm registry
+- DO NOT guess or make up version numbers
+
+**Your previous suggestions (INVALID):**
 \`\`\`json
 ${JSON.stringify(context.suggestedVersions, null, 2)}
 \`\`\`
 
-**Validation errors:**
+**Validation errors from npm:**
 ${context.validationErrors.map((e, i) => `${i + 1}. ${e}`).join('\n')}
 
-**Task:** Return CORRECTED versions that actually exist in npm. Research latest stable versions if needed.
+---
 
-Return ONLY valid JSON mapping package names to corrected versions.`;
+**ANALYSIS REQUIRED:**
+
+For each failed package, you must:
+1. **Identify the issue**: Why did npm reject this version?
+   - Does the package name exist? (typo check)
+   - Is the version number format correct?
+   - Is that specific version published?
+
+2. **Research alternatives**:
+   - For Jest packages: Check recent stable versions (29.x, 28.x)
+   - For @types packages: Must match runtime package major version
+   - For testing-library: Check latest stable (14.x, 15.x)
+   - For identity-obj-proxy: Simple package, use latest
+
+3. **Select VALID version**:
+   - Prefer stable releases (not beta/alpha)
+   - Use semantic versioning (^X.Y.Z)
+   - Ensure compatibility with other packages in the set
+
+**REASONING PROCESS:**
+
+Example analysis:
+\`\`\`
+Package: jest@29.7.0
+Issue: Version 29.7.0 doesn't exist (typo? actual is 29.7.1)
+Research: Latest Jest 29.x is 29.7.1, 28.x is 28.1.3
+Decision: Use jest@^29.7.0 (caret allows patch versions)
+Alternative: Use jest@latest for most recent stable
+\`\`\`
+
+**OUTPUT FORMAT:**
+
+Return ONLY a JSON object with CORRECTED versions:
+\`\`\`json
+{
+  "package-name": "^X.Y.Z",
+  "another-package": "latest"
+}
+\`\`\`
+
+**IMPORTANT:**
+- Use "latest" if you're uncertain (npm will resolve to newest stable)
+- Use caret (^) for flexibility (^29.0.0 allows 29.x.x)
+- Double-check Jest ecosystem compatibility (jest, ts-jest, @types/jest)
+- NO fictional versions - every version MUST exist in npm
+
+**Start your analysis and provide corrected versions:**`;
 
         try {
             const response = await this.sendRequest(
-                "You are an npm version expert. Return only JSON with valid versions.",
+                "You are an expert npm package maintainer. Analyze validation errors and provide ONLY versions that exist in npm registry. Reason through each package carefully.",
                 prompt
             );
+            
             const jsonStr = this.extractJsonFromResponse(response.code);
-            return JSON.parse(jsonStr);
+            const fixed = JSON.parse(jsonStr);
+            
+            this.logger.info('LLM provided fixed versions', { 
+                original: Object.keys(context.suggestedVersions).length,
+                fixed: Object.keys(fixed).length
+            });
+            
+            return fixed;
         } catch (error) {
-            this.logger.error('Failed to fix versions', error);
-            return context.suggestedVersions; // Return as-is if LLM fails
+            this.logger.error('Failed to fix versions with LLM', error);
+            // Fallback: Use "latest" for all packages
+            this.logger.warn('Falling back to "latest" for all packages');
+            const fallback: Record<string, string> = {};
+            for (const pkg of Object.keys(context.suggestedVersions)) {
+                fallback[pkg] = 'latest';
+            }
+            return fallback;
         }
     }
 }

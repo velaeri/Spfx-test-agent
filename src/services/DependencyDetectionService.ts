@@ -107,7 +107,7 @@ export class DependencyDetectionService {
     }
 
     /**
-     * Get compatible dependencies using LLM with retry loop (NO HARDCODED FALLBACK)
+     * Get compatible dependencies using LLM with retry loop + NPM VALIDATION
      */
     async getCompatibleDependencies(projectRoot: string): Promise<Record<string, string>> {
         const maxRetries = 3;
@@ -133,20 +133,55 @@ export class DependencyDetectionService {
             this.logger.info(`Attempt ${attempt}/${maxRetries}...`);
 
             try {
+                // Step 1: LLM suggests versions
                 const llmVersions = await this.llmProvider.detectDependencies(
                     packageJson,
                     lastError ? { error: lastError, attemptNumber: attempt - 1 } : undefined
                 );
 
                 if (llmVersions && Object.keys(llmVersions).length > 0) {
-                    this.logger.info('✅ LLM analysis completed', {
-                        missingCount: Object.keys(llmVersions).length,
+                    this.logger.info('✅ LLM suggested versions', {
+                        count: Object.keys(llmVersions).length,
                         packages: Object.keys(llmVersions)
                     });
-                    return llmVersions;
-                }
 
-                if (Object.keys(llmVersions).length === 0) {
+                    // Step 2: VALIDATE versions against npm registry
+                    this.logger.info('🔍 Validating suggested versions against npm registry...');
+                    const validationErrors: string[] = [];
+                    const validatedVersions = await this.validateVersionsWithNpm(llmVersions, validationErrors);
+
+                    if (validationErrors.length === 0) {
+                        this.logger.info('✅ All versions validated successfully');
+                        return validatedVersions;
+                    }
+
+                    // Step 3: If validation failed, ask LLM to fix
+                    this.logger.warn(`⚠️ Validation errors found: ${validationErrors.length} packages`);
+                    this.logger.debug('Validation errors:', validationErrors);
+
+                    const fixedVersions = await this.llmProvider.validateAndFixVersions({
+                        suggestedVersions: llmVersions,
+                        validationErrors
+                    });
+
+                    // Step 4: Validate fixed versions
+                    const finalValidationErrors: string[] = [];
+                    const finalVersions = await this.validateVersionsWithNpm(fixedVersions, finalValidationErrors);
+
+                    if (finalValidationErrors.length === 0) {
+                        this.logger.info('✅ Fixed versions validated successfully');
+                        return finalVersions;
+                    }
+
+                    // Still have errors after LLM fix - prepare error message for retry
+                    lastError = `Validation failed for packages: ${finalValidationErrors.join(', ')}`;
+                    this.logger.warn(`❌ Still have validation errors after LLM fix`);
+                    
+                    if (attempt < maxRetries) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+                        continue;
+                    }
+                } else if (Object.keys(llmVersions).length === 0) {
                     this.logger.info('✅ All dependencies already installed');
                     return {};
                 }
@@ -155,14 +190,13 @@ export class DependencyDetectionService {
                 this.logger.warn(`❌ LLM attempt ${attempt} failed: ${lastError}`);
                 
                 if (attempt < maxRetries) {
-                    // Wait before retry
                     await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
                     continue;
                 }
             }
         }
 
-        //  ✨ NEW: If LLM fails after retries, try "latest" strategy instead of hardcoded versions
+        // ✨ NEW: If LLM fails after retries, try "latest" strategy
         this.logger.warn('⚠️ LLM failed after 3 attempts - using latest version strategy');
         return this.getLatestCompatibleVersions(installedDeps);
     }
@@ -198,5 +232,101 @@ export class DependencyDetectionService {
         });
 
         return missing;
+    }
+
+    /**
+     * Validate package versions against npm registry
+     * Returns only valid versions, populates errors array for invalid ones
+     */
+    private async validateVersionsWithNpm(
+        versions: Record<string, string>, 
+        errors: string[]
+    ): Promise<Record<string, string>> {
+        const validVersions: Record<string, string> = {};
+        const validationPromises: Promise<void>[] = [];
+
+        for (const [pkg, version] of Object.entries(versions)) {
+            // Skip validation for "latest" - npm will always resolve it
+            if (version === 'latest') {
+                validVersions[pkg] = version;
+                continue;
+            }
+
+            const validationPromise = this.checkPackageVersionExists(pkg, version)
+                .then(exists => {
+                    if (exists) {
+                        validVersions[pkg] = version;
+                        this.logger.debug(`✅ ${pkg}@${version} exists in npm`);
+                    } else {
+                        errors.push(`${pkg}@${version} not found in npm registry`);
+                        this.logger.warn(`❌ ${pkg}@${version} does NOT exist in npm`);
+                    }
+                })
+                .catch(error => {
+                    errors.push(`Failed to validate ${pkg}@${version}: ${error.message}`);
+                    this.logger.error(`Failed to validate ${pkg}@${version}`, error);
+                });
+
+            validationPromises.push(validationPromise);
+        }
+
+        // Wait for all validations
+        await Promise.all(validationPromises);
+
+        return validVersions;
+    }
+
+    /**
+     * Check if a specific package@version exists in npm registry
+     */
+    private async checkPackageVersionExists(packageName: string, version: string): Promise<boolean> {
+        return new Promise((resolve) => {
+            // Clean version string (remove ^, ~, etc.)
+            const cleanVersion = version.replace(/^[\^~>=<]/, '');
+
+            // Use npm view to check if package@version exists
+            const child = spawn('npm', ['view', `${packageName}@${cleanVersion}`, 'version'], {
+                shell: true,
+                stdio: ['ignore', 'pipe', 'pipe']
+            });
+
+            let stdout = '';
+            let stderr = '';
+
+            child.stdout?.on('data', (data) => {
+                stdout += data.toString();
+            });
+
+            child.stderr?.on('data', (data) => {
+                stderr += data.toString();
+            });
+
+            child.on('close', (code) => {
+                if (code === 0 && stdout.trim().length > 0) {
+                    // Package version exists
+                    resolve(true);
+                } else if (stderr.includes('E404') || stderr.includes('ETARGET') || stderr.includes('notarget')) {
+                    // Package or version not found
+                    resolve(false);
+                } else {
+                    // Other errors (network, etc.) - assume valid to avoid blocking
+                    this.logger.warn(`Could not validate ${packageName}@${version}, assuming valid`);
+                    resolve(true);
+                }
+            });
+
+            child.on('error', (error) => {
+                this.logger.error(`Error validating ${packageName}@${version}`, error);
+                // On error, assume valid to avoid blocking installation
+                resolve(true);
+            });
+
+            // Timeout after 5 seconds per package
+            setTimeout(() => {
+                child.kill();
+                this.logger.warn(`Validation timeout for ${packageName}@${version}, assuming valid`);
+                resolve(true);
+            }, 5000);
+        });
     }
 }

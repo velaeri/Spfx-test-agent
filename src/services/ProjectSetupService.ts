@@ -5,6 +5,8 @@ import { Logger } from './Logger';
 import { DependencyDetectionService } from './DependencyDetectionService';
 import { PackageInstallationService } from './PackageInstallationService';
 import { JestConfigurationService } from './JestConfigurationService';
+import { ILLMProvider } from '../interfaces/ILLMProvider';
+import { LLMProviderFactory } from '../factories/LLMProviderFactory';
 
 export interface SetupStatus {
     hasPackageJson: boolean;
@@ -30,12 +32,15 @@ export class ProjectSetupService {
     private dependencyService: DependencyDetectionService;
     private packageService: PackageInstallationService;
     private configService: JestConfigurationService;
+    private llmProvider: ILLMProvider;
 
-    constructor() {
+    constructor(llmProvider?: ILLMProvider) {
         this.logger = Logger.getInstance();
+        // Use provided LLM or create default
+        this.llmProvider = llmProvider || LLMProviderFactory.createProvider();
         this.dependencyService = new DependencyDetectionService();
         this.packageService = new PackageInstallationService();
-        this.configService = new JestConfigurationService();
+        this.configService = new JestConfigurationService(this.llmProvider);
     }
 
     /**
@@ -173,18 +178,72 @@ export class ProjectSetupService {
                 progress.report({ message: 'Updating package.json scripts...', increment: 20 });
                 await this.configService.updatePackageJsonScripts(projectRoot);
 
-                // Auto install if requested
+                // Auto install if requested with LLM-powered retry loop
                 if (options.autoInstall && status.installCommand) {
-                    progress.report({ message: 'Installing dependencies...', increment: 10 });
-                    // Parse install command to get package list or use existing data
-                    // We can reconstruct package list from missingDependencies
-                    const compatibleDeps = await this.dependencyService.getCompatibleDependencies(projectRoot);
-                     const packageVersions = status.missingDependencies.map(pkg => {
-                        const version = compatibleDeps[pkg];
-                        return `${pkg}@${version}`;
-                    });
-                    
-                    await this.packageService.installPackages(projectRoot, packageVersions);
+                    const maxInstallRetries = 3;
+                    let installAttempt = 0;
+                    let installSuccess = false;
+                    let lastInstallError: string | undefined;
+
+                    progress.report({ message: 'Installing dependencies with LLM validation...', increment: 10 });
+
+                    while (installAttempt < maxInstallRetries && !installSuccess) {
+                        installAttempt++;
+                        this.logger.info(`📦 Installation attempt ${installAttempt}/${maxInstallRetries}...`);
+
+                        // Get package versions (from LLM or previous analysis)
+                        let packageVersions: string[];
+
+                        if (installAttempt === 1) {
+                            // First attempt: use LLM-validated versions
+                            const compatibleDeps = await this.dependencyService.getCompatibleDependencies(projectRoot);
+                            packageVersions = status.missingDependencies.map(pkg => {
+                                const version = compatibleDeps[pkg];
+                                return `${pkg}@${version}`;
+                            });
+                        } else {
+                            // Subsequent attempts: ask LLM to fix based on error
+                            this.logger.info('❌ Installation failed, asking LLM to analyze and fix...');
+                            
+                            const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf-8'));
+                            const analysis = await this.llmProvider.analyzeAndFixError(lastInstallError!, {
+                                packageJson,
+                                errorType: 'dependency'
+                            });
+
+                            this.logger.info(`🧠 LLM diagnosis: ${analysis.diagnosis}`);
+
+                            if (analysis.packages && analysis.packages.length > 0) {
+                                packageVersions = analysis.packages;
+                                this.logger.info(`🔄 LLM suggested packages: ${packageVersions.join(', ')}`);
+                            } else {
+                                this.logger.warn('LLM did not suggest alternative packages, retrying with same versions');
+                                const compatibleDeps = await this.dependencyService.getCompatibleDependencies(projectRoot);
+                                packageVersions = status.missingDependencies.map(pkg => {
+                                    const version = compatibleDeps[pkg];
+                                    return `${pkg}@${version}`;
+                                });
+                            }
+                        }
+
+                        // Attempt installation
+                        const installResult = await this.packageService.installPackages(projectRoot, packageVersions);
+
+                        if (installResult.success) {
+                            installSuccess = true;
+                            this.logger.info('✅ Dependencies installed successfully');
+                            progress.report({ message: 'Dependencies installed successfully', increment: 10 });
+                        } else {
+                            lastInstallError = installResult.error || 'Unknown installation error';
+                            this.logger.warn(`❌ Installation attempt ${installAttempt} failed: ${lastInstallError.substring(0, 200)}`);
+                        }
+                    }
+
+                    if (!installSuccess) {
+                        const errorMsg = `Failed to install dependencies after ${maxInstallRetries} attempts. Last error: ${lastInstallError}`;
+                        this.logger.error(errorMsg);
+                        throw new Error(errorMsg);
+                    }
                 }
 
                 progress.report({ message: 'Setup complete!', increment: 100 });

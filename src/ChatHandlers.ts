@@ -8,6 +8,7 @@ import { ProjectSetupService } from './services/ProjectSetupService';
 import { TelemetryService } from './services/TelemetryService';
 import { CoverageService, CoverageReport } from './services/CoverageService';
 import { LLMProviderFactory } from './factories/LLMProviderFactory';
+import { BatchGenerationPlan } from './interfaces/ILLMProvider';
 import { FileScanner } from './utils/FileScanner';
 import { spawn } from 'child_process';
 import { 
@@ -698,6 +699,57 @@ export async function handleGenerateAllRequest(
         return { metadata: { command: 'generate-all' } };
     }
 
+    // 🧠 LLM-FIRST: Plan batch generation strategy
+    let batchPlan: BatchGenerationPlan | undefined = undefined;
+    try {
+        stream.progress('Planning batch generation strategy with LLM...');
+        const llmProvider = LLMProviderFactory.createProvider();
+        
+        // Build project structure summary
+        const projectStructure = {
+            totalFiles: filesWithoutTests.length,
+            projectRoot: firstProjectRoot,
+            fileTypes: {} as Record<string, number>
+        };
+        
+        // Count file types
+        for (const file of filesWithoutTests) {
+            const ext = path.extname(file.fsPath);
+            projectStructure.fileTypes[ext] = (projectStructure.fileTypes[ext] || 0) + 1;
+        }
+        
+        // Build dependency map (simplified)
+        const dependencies: Record<string, string[]> = {};
+        for (const file of filesWithoutTests.slice(0, 20)) { // Sample first 20
+            const fileName = path.basename(file.fsPath);
+            dependencies[fileName] = []; // Simplified: would need actual dependency analysis
+        }
+        
+        batchPlan = await llmProvider.planBatchGeneration({
+            allFiles: filesWithoutTests.map(f => path.relative(firstProjectRoot, f.fsPath)),
+            projectStructure,
+            existingTests: [], // Already filtered out
+            dependencies
+        });
+        
+        // Show plan to user
+        stream.markdown(`\n🧠 **Batch Generation Plan (by LLM):**\n\n`);
+        for (const group of batchPlan.groups.slice(0, 3)) { // Show top 3 groups
+            stream.markdown(`**${group.name}** (Priority ${group.priority}): ${group.files.length} files\n`);
+            stream.markdown(`  _${group.reason}_\n\n`);
+        }
+        stream.markdown(`**Estimated time:** ${batchPlan.estimatedTime}\n`);
+        stream.markdown(`**Recommended concurrency:** ${batchPlan.recommendedConcurrency}\n\n`);
+        
+        logger.info('Batch generation plan created', {
+            groups: batchPlan.groups.length,
+            estimatedTime: batchPlan.estimatedTime
+        });
+    } catch (error) {
+        logger.warn('Failed to plan batch generation, using default order', error);
+        stream.markdown(`⚠️ Could not plan batch strategy (LLM error), processing files in default order\n\n`);
+    }
+
     // Ask for confirmation to proceed
     stream.markdown(`⚠️ Esto generará tests para ${filesWithoutTests.length} archivos. Puede tomar varios minutos.\n\n`);
 
@@ -705,13 +757,45 @@ export async function handleGenerateAllRequest(
     let failCount = 0;
     let currentFile = 0;
 
-    // Process each project
+    // Reorder files based on LLM plan
+    let orderedFiles = filesWithoutTests;
+    if (batchPlan) {
+        const fileMap = new Map(filesWithoutTests.map(f => [path.relative(firstProjectRoot, f.fsPath), f]));
+        const newOrder: vscode.Uri[] = [];
+        
+        // Add files in group priority order
+        for (const group of batchPlan.groups.sort((a: any, b: any) => a.priority - b.priority)) {
+            for (const relPath of group.files) {
+                const file = fileMap.get(relPath);
+                if (file) {
+                    newOrder.push(file);
+                    fileMap.delete(relPath);
+                }
+            }
+        }
+        
+        // Add any remaining files not in plan
+        for (const file of fileMap.values()) {
+            newOrder.push(file);
+        }
+        
+        orderedFiles = newOrder;
+        logger.info(`Files reordered according to LLM plan: ${orderedFiles.length} files`);
+    }
+
+    // Process each project with ordered files
     for (const [projectRoot, files] of projectMap.entries()) {
         stream.markdown(`### Proyecto: \`${path.basename(projectRoot)}\`\n\n`);
         
         const agent = new TestAgent(undefined, stateService);
 
-        for (const file of files) {
+        // Use orderedFiles for this project
+        const projectFiles = orderedFiles.filter(f => {
+            const folder = vscode.workspace.getWorkspaceFolder(f);
+            return folder?.uri.fsPath === projectRoot;
+        });
+
+        for (const file of projectFiles) {
             if (token.isCancellationRequested) {
                 stream.markdown('\n⚠️ Generación cancelada por el usuario\n');
                 break;

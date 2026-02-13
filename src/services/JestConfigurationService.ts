@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './Logger';
+import { ILLMProvider, ProjectAnalysis, GeneratedJestConfig } from '../interfaces/ILLMProvider';
 
 /**
  * Minimal ts-jest transform config — the ESSENTIAL piece to avoid Babel parsing TS
@@ -79,9 +80,11 @@ const FILE_MOCK_CONTENT = `module.exports = 'test-file-stub';
 
 export class JestConfigurationService {
     private logger: Logger;
+    private llmProvider?: ILLMProvider;
 
-    constructor() {
+    constructor(llmProvider?: ILLMProvider) {
         this.logger = Logger.getInstance();
+        this.llmProvider = llmProvider;
     }
 
     /**
@@ -106,10 +109,56 @@ export class JestConfigurationService {
     }
 
     /**
-     * Create jest.config.js
+     * Create jest.config.js using LLM-generated personalized configuration
+     * Falls back to default config if LLM is unavailable
      */
     async createJestConfig(projectRoot: string): Promise<void> {
         const configPath = path.join(projectRoot, 'jest.config.js');
+        
+        // Try LLM-first approach if provider available
+        if (this.llmProvider) {
+            try {
+                this.logger.info('Generating personalized Jest configuration via LLM...');
+                const projectAnalysis = await this.buildProjectAnalysis(projectRoot);
+                const requirements = this.detectRequirements(projectAnalysis);
+                
+                const llmConfig = await this.llmProvider.generateJestConfig({
+                    projectAnalysis,
+                    requirements
+                });
+                
+                // Write LLM-generated config
+                fs.writeFileSync(configPath, llmConfig.configJs, 'utf-8');
+                
+                // Write setup file if provided
+                if (llmConfig.setupJs) {
+                    const setupPath = path.join(projectRoot, 'jest.setup.js');
+                    fs.writeFileSync(setupPath, llmConfig.setupJs, 'utf-8');
+                    this.logger.info(`Created jest.setup.js from LLM`);
+                }
+                
+                // Write custom mocks if provided
+                if (Object.keys(llmConfig.mocks).length > 0) {
+                    const mocksDir = path.join(projectRoot, '__mocks__');
+                    if (!fs.existsSync(mocksDir)) {
+                        fs.mkdirSync(mocksDir);
+                    }
+                    for (const [filename, content] of Object.entries(llmConfig.mocks)) {
+                        fs.writeFileSync(path.join(mocksDir, filename), content, 'utf-8');
+                    }
+                    this.logger.info(`Created ${Object.keys(llmConfig.mocks).length} custom mocks`);
+                }
+                
+                this.logger.info(`✅ Created LLM-personalized jest.config.js at ${configPath}`);
+                this.logger.debug(`LLM explanation: ${llmConfig.explanation}`);
+                return;
+            } catch (error) {
+                this.logger.warn('LLM config generation failed, falling back to default', error);
+            }
+        }
+        
+        // Fallback: Use default hardcoded config
+        this.logger.info('Using default Jest configuration (LLM unavailable)');
         const config = buildDefaultJestConfig(projectRoot);
         const configContent = `module.exports = ${JSON.stringify(config, null, 2)};
 `;
@@ -279,5 +328,122 @@ export class JestConfigurationService {
     isTsJestInstalled(projectRoot: string): boolean {
         const tsJestPath = path.join(projectRoot, 'node_modules', 'ts-jest');
         return fs.existsSync(tsJestPath);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  LLM-FIRST HELPERS
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Build project analysis for LLM
+     */
+    private async buildProjectAnalysis(projectRoot: string): Promise<ProjectAnalysis> {
+        const packageJsonPath = path.join(projectRoot, 'package.json');
+        const tsConfigPath = path.join(projectRoot, 'tsconfig.json');
+        
+        let packageJson: any = {};
+        let tsConfig: any = undefined;
+        let existingJestConfig: string | undefined;
+        
+        // Read package.json
+        if (fs.existsSync(packageJsonPath)) {
+            packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        }
+        
+        // Read tsconfig.json
+        if (fs.existsSync(tsConfigPath)) {
+            tsConfig = JSON.parse(fs.readFileSync(tsConfigPath, 'utf-8'));
+        }
+        
+        // Read existing jest config if present
+        const configFiles = ['jest.config.js', 'jest.config.ts', 'jest.config.json'];
+        for (const file of configFiles) {
+            const configPath = path.join(projectRoot, file);
+            if (fs.existsSync(configPath)) {
+                existingJestConfig = fs.readFileSync(configPath, 'utf-8');
+                break;
+            }
+        }
+        
+        // Find existing tests
+        const existingTests: string[] = [];
+        const srcDir = path.join(projectRoot, 'src');
+        if (fs.existsSync(srcDir)) {
+            this.findTestFiles(srcDir, existingTests);
+        }
+        
+        return {
+            packageJson,
+            tsConfig,
+            existingJestConfig,
+            existingTests: existingTests.slice(0, 5), // Only first 5 as examples
+            dependencies: packageJson.dependencies || {},
+            devDependencies: packageJson.devDependencies || {},
+            framework: this.detectFramework(packageJson),
+            reactVersion: packageJson.dependencies?.react || packageJson.devDependencies?.react,
+            nodeVersion: packageJson.engines?.node
+        };
+    }
+
+    private findTestFiles(dir: string, results: string[]): void {
+        if (results.length >= 5) return; // Limit to 5 examples
+        
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (results.length >= 5) break;
+                
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory() && entry.name !== 'node_modules') {
+                    this.findTestFiles(fullPath, results);
+                } else if (entry.name.match(/\.(test|spec)\.(ts|tsx|js|jsx)$/)) {
+                    results.push(fs.readFileSync(fullPath, 'utf-8').substring(0, 500)); // First 500 chars
+                }
+            }
+        } catch (error) {
+            // Ignore read errors
+        }
+    }
+
+    private detectFramework(packageJson: any): string {
+        const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+        
+        if (deps['@microsoft/sp-core-library']) return 'spfx';
+        if (deps['@angular/core']) return 'angular';
+        if (deps['next']) return 'next';
+        if (deps['react']) return 'react';
+        if (deps['vue']) return 'vue';
+        if (deps['@types/vscode']) return 'vscode-extension';
+        
+        return 'unknown';
+    }
+
+    private detectRequirements(analysis: ProjectAnalysis): string[] {
+        const requirements: string[] = [];
+        
+        if (analysis.framework === 'spfx') {
+            requirements.push('Support SharePoint Framework (SPFx) components');
+            requirements.push('Mock @microsoft/sp-* modules');
+            requirements.push('Handle Office UI Fabric / Fluent UI');
+        }
+        
+        if (analysis.reactVersion) {
+            requirements.push('Support React components and JSX/TSX');
+            requirements.push('Configure jsdom test environment');
+        }
+        
+        if (analysis.tsConfig?.compilerOptions?.jsx) {
+            requirements.push('Transform TypeScript with JSX support');
+        }
+        
+        if (analysis.devDependencies['@testing-library/react']) {
+            requirements.push('Support Testing Library matchers');
+        }
+        
+        requirements.push('Use ts-jest for TypeScript transformation');
+        requirements.push('Mock CSS/SCSS imports');
+        requirements.push('Mock static assets (images, fonts)');
+        
+        return requirements;
     }
 }

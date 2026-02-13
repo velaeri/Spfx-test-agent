@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ILLMProvider, TestContext, LLMResult } from '../interfaces/ILLMProvider';
+import { CoreLLMResult } from '../interfaces/ICoreProvider';
 import { LLMNotAvailableError, LLMTimeoutError, RateLimitError } from '../errors/CustomErrors';
 import { Logger } from '../services/Logger';
 
@@ -39,6 +40,35 @@ export class CopilotProvider implements ILLMProvider {
             return `Copilot (${this.vendor}/${this.family})`;
         }
         return `Copilot (${this.vendor}/user-selected)`;
+    }
+
+    /**
+     * Get the vendor ID (implements ICoreProvider)
+     */
+    public getVendorId(): string {
+        return this.vendor;
+    }
+
+    /**
+     * Generic prompt sending method (implements ICoreProvider)
+     * This is the core interface for all LLM interactions in the new architecture
+     */
+    public async sendPrompt(
+        systemPrompt: string, 
+        userPrompt: string, 
+        options?: any
+    ): Promise<CoreLLMResult> {
+        this.logger.debug('[CopilotProvider] sendPrompt called');
+
+        const result = await this.sendRequest(systemPrompt, userPrompt);
+        
+        // Convert LLMResult to CoreLLMResult
+        return {
+            content: result.code,
+            model: result.model,
+            tokensUsed: result.tokensUsed,
+            metadata: options
+        };
     }
 
     /**

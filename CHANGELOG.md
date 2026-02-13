@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.6.0] - 2026-02-13
+
+### 🏗️ **MAJOR REFACTOR: Capability-Based Plugin Architecture**
+
+#### **Strategic Vision:**
+Transformed the extension from a **testing-specific tool** to an **extensible code assistant platform** using a capability-based plugin architecture. Testing is now ONE capability among many future possibilities (refactoring, architecture analysis, complexity assessment, etc.).
+
+#### **Architectural Changes:**
+
+**1. New Core Interfaces**
+- ✅ **`ICoreProvider`** - Minimal, generic LLM interface
+  - `sendPrompt()` - Core method for all LLM interactions
+  - `isAvailable()`, `getProviderName()`, `getVendorId()`
+  - Replaces testing-specific methods with generic prompt interface
+  
+- ✅ **`ILLMCapability<TInput, TOutput>`** - Plugin system interface
+  - `execute()` - Run capability with typed input/output
+  - `canHandle()` - Auto-detection based on context (command, message, files)
+  - `validateInput()` - Pre-execution validation
+  - `getHelpText()` - Self-documenting capabilities
+  
+- ✅ **`ILLMProvider extends ICoreProvider`** - Backward compatibility bridge
+  - Maintains all existing testing-specific methods
+  - 100% backward compatible with v0.5.x
+  - Gradual migration path to new architecture
+
+**2. Generic Agent**
+- ✅ **`CodeAssistantAgent`** - Capability orchestrator
+  - `registerCapability()` - Plugin registration
+  - `execute()` - Named capability execution
+  - `autoExecute()` - Context-based auto-detection
+  - `showHelp()` - Self-documenting interface
+  - `setProvider()` - Hot-swap LLM provider at runtime
+
+**3. Adapter Layer**
+- ✅ **`CoreProviderAdapter`** - Bridge ICoreProvider → ILLMProvider
+  - Wraps generic `sendPrompt()` into testing-specific methods
+  - Allows TestAgent to work with new architecture
+  - Zero behavioral changes from v0.5.3
+
+**4. Capability Implementation**
+- ✅ **`TestGenerationCapability`** - Testing as a capability
+  - Pure wrapper around existing `TestAgent`
+  - Preserves ALL v0.5.3 functionality (self-healing, strategy planning, etc.)
+  - Implements `ILLMCapability` for extensibility
+  - Input validation with detailed error messages
+  - Context detection (commands: `/generate`, `/fix-test`; keywords: "generate test", "create test")
+
+**5. Provider Updates**
+- ✅ **`CopilotProvider` & `AzureOpenAIProvider` implement ICoreProvider**
+  - Added `sendPrompt()` method (delegates to existing `sendRequest()`)
+  - Added `getVendorId()` method
+  - Backward compatible with ILLMProvider interface
+  
+#### **Benefits:**
+
+✅ **Extensibility**
+- Add new capabilities without touching core code
+- Each capability is self-contained and independently testable
+- Plugin marketplace potential (community contributions)
+
+✅ **Maintainability**
+- Clear separation of concerns
+- Generic agent reduces code duplication
+- Easier to add features (refactoring, analysis, documentation generation)
+
+✅ **Flexibility**
+- Hot-swap LLM providers at runtime
+- Context-based auto-detection of capabilities
+- Self-documenting help system
+
+✅ **Zero Breaking Changes**
+- 100% backward compatible with v0.5.3
+- Existing tests pass without modification
+- Gradual migration path
+
+#### **Future Capabilities (Planned):**
+- 🔄 **CodeRefactoringCapability** - Extract function, rename, simplify
+- 📊 **ArchitectureAnalysisCapability** - Dependency graphs, modularity scores
+- 🧠 **ComplexityAnalysisCapability** - Cyclomatic complexity, cognitive load
+- 📝 **DocumentationGenerationCapability** - JSDoc, README, architecture docs
+- 🔒 **CodeSecurityScanCapability** - Vulnerability detection, best practices
+
+#### **Migration Notes:**
+- No configuration changes required
+- Existing commands work identically (`/generate`, `/generate-all`, `/setup`, `/install`)
+- New architecture is opt-in for future capabilities
+- Documentation updated: see `docs/ARCHITECTURE-EXTENSIBILITY.md`
+
+---
+
 ## [0.5.3] - 2026-02-13
 
 ### 🐛 **CRITICAL BUGFIX: Test Error Capture & LLM Feedback Loop**

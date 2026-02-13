@@ -1,5 +1,6 @@
 import { OpenAIClient, AzureKeyCredential } from "@azure/openai";
 import { ILLMProvider, TestContext, LLMResult } from '../interfaces/ILLMProvider';
+import { CoreLLMResult } from '../interfaces/ICoreProvider';
 import { Logger } from '../services/Logger';
 import { ConfigService } from '../services/ConfigService';
 import { PROMPTS } from '../utils/prompts';
@@ -34,6 +35,35 @@ export class AzureOpenAIProvider implements ILLMProvider {
 
     public getProviderName(): string {
         return 'Azure OpenAI';
+    }
+
+    /**
+     * Get the vendor ID (implements ICoreProvider)
+     */
+    public getVendorId(): string {
+        return 'azure-openai';
+    }
+
+    /**
+     * Generic prompt sending method (implements ICoreProvider)
+     * This is the core interface for all LLM interactions in the new architecture
+     */
+    public async sendPrompt(
+        systemPrompt: string, 
+        userPrompt: string, 
+        options?: any
+    ): Promise<CoreLLMResult> {
+        this.logger.debug('[AzureOpenAIProvider] sendPrompt called');
+
+        const result = await this.sendRequest(systemPrompt, userPrompt);
+        
+        // Convert LLMResult to CoreLLMResult
+        return {
+            content: result.code,
+            model: result.model,
+            tokensUsed: result.tokensUsed,
+            metadata: options
+        };
     }
 
     public async isAvailable(): Promise<boolean> {

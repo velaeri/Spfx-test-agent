@@ -1,3 +1,5 @@
+import { ICoreProvider } from './ICoreProvider';
+
 /**
  * Context for test generation and fixing
  */
@@ -81,8 +83,11 @@ export interface BatchGenerationPlan {
 /**
  * Interface for LLM providers
  * Allows switching between different AI providers (Copilot, Azure OpenAI, etc.)
+ * 
+ * Extends ICoreProvider to maintain compatibility with new capability-based architecture
+ * while preserving testing-specific functionality.
  */
-export interface ILLMProvider {
+export interface ILLMProvider extends ICoreProvider {
     /**
      * Generate a test file for the given source code
      */
@@ -92,16 +97,6 @@ export interface ILLMProvider {
      * Fix a failing test based on error output
      */
     fixTest(context: TestContext): Promise<LLMResult>;
-
-    /**
-     * Check if the provider is available
-     */
-    isAvailable(): Promise<boolean>;
-
-    /**
-     * Get the provider name
-     */
-    getProviderName(): string;
 
     /**
      * Detect missing dependencies based on package.json content

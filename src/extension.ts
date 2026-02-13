@@ -6,7 +6,8 @@ import { StateService } from './services/StateService';
 import { ProjectSetupService } from './services/ProjectSetupService';
 import { WorkspaceNotFoundError } from './errors/CustomErrors';
 import { 
-    handleSetupRequest, 
+    handleSetupRequest,
+    handleInstallRequest,
     handleGenerateAllRequest, 
     handleGenerateSingleRequest, 
     handleError 
@@ -62,8 +63,20 @@ export function activate(context: vscode.ExtensionContext) {
         await handleCheckSetupCommand();
     });
 
+    // Command to retry install with a specific command (from LLM suggestion)
+    const installWithCommandCommand = vscode.commands.registerCommand(
+        'spfx-test-agent.installWithCommand',
+        async (command: string) => {
+            // Open chat with /install command
+            await vscode.commands.executeCommand('vscode.chat.open', {
+                query: `@spfx-tester /install ${command}`
+            });
+        }
+    );
+
     context.subscriptions.push(setupCommand);
     context.subscriptions.push(checkSetupCommand);
+    context.subscriptions.push(installWithCommandCommand);
 
     // Watch for configuration changes
     context.subscriptions.push(
@@ -145,6 +158,12 @@ async function handleChatRequest(
         // Check command type
         if (request.command === 'setup') {
             return await handleSetupRequest(stream, token);
+        }
+        
+        if (request.command === 'install') {
+            // Extract command from prompt if provided (for retry with suggested versions)
+            const commandFromPrompt = request.prompt.trim();
+            return await handleInstallRequest(stream, token, commandFromPrompt || undefined);
         }
         
         if (request.command === 'generate-all') {

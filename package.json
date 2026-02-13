@@ -2,7 +2,7 @@
   "name": "spfx-test-agent",
   "displayName": "SPFX Test Agent",
   "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
-  "version": "0.4.29",
+  "version": "0.4.35",
   "publisher": "velaeri",
   "repository": {
     "type": "git",
@@ -31,6 +31,11 @@
         "command": "spfx-test-agent.checkSetup",
         "title": "Check Jest Environment Setup",
         "category": "SPFX Test Agent"
+      },
+      {
+        "command": "spfx-test-agent.installWithCommand",
+        "title": "Install with Suggested Command",
+        "category": "SPFX Test Agent"
       }
     ],
     "chatParticipants": [
@@ -43,6 +48,10 @@
           {
             "name": "setup",
             "description": "Setup Jest testing environment (install dependencies and create config files)"
+          },
+          {
+            "name": "install",
+            "description": "Install Jest dependencies with AI-powered error resolution"
           },
           {
             "name": "generate",

@@ -319,8 +319,8 @@ If no packages need installing, use empty array. If no commands needed, omit the
      * Extract TypeScript/TSX code from markdown code blocks
      */
     private extractCodeFromMarkdown(text: string): string {
-        // Look for code blocks with typescript, tsx, ts, or javascript
-        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\s*([\s\S]*?)\s*```/;
+        // Look for code blocks with typescript, tsx, ts, javascript, or json
+        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js|json)?\s*([\s\S]*?)\s*```/;
         const match = text.match(codeBlockRegex);
 
         if (match) {
@@ -328,6 +328,27 @@ If no packages need installing, use empty array. If no commands needed, omit the
         }
 
         // If no code block found, return as-is (LLM might have returned raw code)
+        return text.trim();
+    }
+
+    /**
+     * Extract JSON from LLM response (more robust for mixed text + JSON)
+     */
+    private extractJsonFromResponse(text: string): string {
+        // First, try to find JSON in markdown code blocks
+        const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
+        const blockMatch = text.match(jsonBlockRegex);
+        if (blockMatch) {
+            return blockMatch[1].trim();
+        }
+
+        // If no code block, look for raw JSON (find first { to last })
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            return jsonMatch[0].trim();
+        }
+
+        // Fallback: return as-is and let JSON.parse fail with better error
         return text.trim();
     }
 
@@ -381,13 +402,21 @@ Return ONLY a JSON object mapping package names to their recommended version str
             
             // Try to parse JSON from the response
             try {
-                // Remove potential markdown code blocks
-                const jsonStr = this.extractCodeFromMarkdown(response.code);
-                this.logger.debug('Parsing LLM dependency response', { jsonStr });
+                // Extract JSON using robust method
+                const jsonStr = this.extractJsonFromResponse(response.code);
+                this.logger.debug('Extracted JSON from LLM response', { length: jsonStr.length, preview: jsonStr.substring(0, 100) });
                 const versions = JSON.parse(jsonStr);
+                
+                // Validate it's an object (not array or primitive)
+                if (typeof versions !== 'object' || Array.isArray(versions)) {
+                    this.logger.warn('LLM returned non-object JSON, ignoring');
+                    return {};
+                }
+                
+                this.logger.info('Successfully parsed LLM dependency recommendations', { count: Object.keys(versions).length });
                 return versions;
             } catch (parseError) {
-                this.logger.error('Failed to parse LLM dependency JSON', parseError);
+                this.logger.error('Failed to parse LLM dependency JSON', { error: parseError, rawResponse: response.code.substring(0, 500) });
                 return {};
             }
         } catch (error) {

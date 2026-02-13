@@ -7,7 +7,9 @@ import { StateService } from './services/StateService';
 import { ProjectSetupService } from './services/ProjectSetupService';
 import { TelemetryService } from './services/TelemetryService';
 import { CoverageService, CoverageReport } from './services/CoverageService';
+import { LLMProviderFactory } from './factories/LLMProviderFactory';
 import { FileScanner } from './utils/FileScanner';
+import { spawn } from 'child_process';
 import { 
     WorkspaceNotFoundError, 
     FileValidationError,
@@ -24,6 +26,218 @@ const telemetryService = TelemetryService.getInstance();
 /**
  * Handle setup command - Configure Jest environment
  */
+/**
+ * Handle /install command - Execute npm install with LLM-powered error resolution
+ */
+export async function handleInstallRequest(
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    installCommand?: string
+): Promise<vscode.ChatResult> {
+    const startTime = Date.now();
+    telemetryService.trackCommandExecution('install');
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        throw new WorkspaceNotFoundError();
+    }
+
+    const workspaceRoot = workspaceFolders[0].uri.fsPath;
+    const setupService = new ProjectSetupService();
+    const setupStatus = await setupService.checkProjectSetup(workspaceRoot);
+
+    // If no command provided, get it from setupService
+    const commandToRun = installCommand || setupStatus.installCommand;
+
+    if (!commandToRun) {
+        stream.markdown('✅ **No hay dependencias que instalar**\n\n');
+        stream.markdown('Todas las dependencias Jest ya están instaladas.\n');
+        return { metadata: { command: 'install' } };
+    }
+
+    stream.markdown('## 📦 Instalando Dependencias Jest\n\n');
+    stream.markdown(`\`\`\`bash\n${commandToRun}\n\`\`\`\n\n`);
+
+    // Execute npm install with real-time output streaming
+    const result = await executeNpmInstall(commandToRun, workspaceRoot, stream, token);
+
+    if (result.success) {
+        const duration = Date.now() - startTime;
+        stream.markdown(`\n✅ **Instalación completada exitosamente** (${(duration / 1000).toFixed(1)}s)\n\n`);
+        stream.markdown('Siguiente paso: Usa `@spfx-tester /generate-all` para generar tests.\n');
+        return { metadata: { command: 'install' } };
+    } else {
+        // Installation failed - Use LLM to analyze error and suggest fixes
+        stream.markdown(`\n❌ **Instalación fallida**\n\n`);
+        
+        // Show raw error first
+        stream.markdown(`### 📋 Error de npm\n\n`);
+        const errorPreview = result.error.substring(0, 1500);
+        stream.markdown(`\`\`\`\n${errorPreview}${result.error.length > 1500 ? '\n... (truncado)' : ''}\n\`\`\`\n\n`);
+        
+        stream.markdown('🧠 Analizando el error con IA...\n\n');
+
+        const llmProvider = LLMProviderFactory.createProvider();
+        
+        try {
+            // Use fixTest instead of generateTest for better error analysis
+            const llmResult = await llmProvider.fixTest({
+                sourceCode: await getPackageJsonContext(workspaceRoot),
+                fileName: 'package.json',
+                currentTestCode: commandToRun,
+                errorContext: result.error.substring(0, 3000), // Limit error size
+                systemPrompt: `Eres un experto en resolver conflictos de dependencias npm. 
+Analiza errores de npm install y sugiere versiones compatibles.
+Responde SIEMPRE con:
+1. ANALISIS: [explicación del problema]
+2. COMANDO: [comando npm install completo con versiones específicas]`
+            });
+
+            // Try to extract structured response
+            let analysis = extractSection(llmResult.code, 'ANALISIS');
+            let suggestedCommand = extractSection(llmResult.code, 'COMANDO');
+            
+            // Fallback: if no structured response, show full LLM output and try to extract command
+            if (!analysis && !suggestedCommand) {
+                stream.markdown(`### 🧠 Análisis del LLM\n\n${llmResult.code}\n\n`);
+                
+                // Try to find npm install command in the response
+                const npmMatch = llmResult.code.match(/npm\s+install[^\n]+/);
+                if (npmMatch) {
+                    suggestedCommand = npmMatch[0];
+                }
+            }
+            
+            if (analysis) {
+                stream.markdown(`### 🔍 Análisis del Error\n\n${analysis}\n\n`);
+            }
+
+            if (suggestedCommand) {
+                const cleanCommand = suggestedCommand.replace(/```[\w]*\n?|```/g, '').trim();
+                stream.markdown(`### 💡 Comando Sugerido\n\n\`\`\`bash\n${cleanCommand}\n\`\`\`\n\n`);
+                
+                // Offer to retry with suggested command
+                stream.button({
+                    command: 'spfx-test-agent.installWithCommand',
+                    arguments: [cleanCommand],
+                    title: '🔄 Reintentar con versiones sugeridas'
+                });
+                stream.markdown('\n\n');
+            } else {
+                stream.markdown('⚠️ El LLM no pudo generar un comando alternativo específico.\n');
+                stream.markdown('💡 **Sugerencias generales:**\n');
+                stream.markdown('- Revisa los conflictos de peer dependencies en el error\n');
+                stream.markdown('- Intenta con `--force` si `--legacy-peer-deps` no funciona\n');
+                stream.markdown('- Verifica que las versiones de React/TypeScript sean compatibles\n');
+            }
+
+        } catch (llmError) {
+            logger.error('LLM analysis failed', llmError);
+            stream.markdown('⚠️ El análisis automático con IA falló.\n\n');
+            stream.markdown(`**Error del LLM:** ${llmError instanceof Error ? llmError.message : 'Unknown'}\n\n`);
+            stream.markdown('💡 Por favor, revisa el error de npm arriba y ajusta las versiones manualmente.\n');
+        }
+
+        return { errorDetails: { message: 'npm install failed' } };
+    }
+}
+
+/**
+ * Execute npm install with real-time output streaming
+ */
+async function executeNpmInstall(
+    command: string,
+    cwd: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken
+): Promise<{ success: boolean; output: string; error: string }> {
+    return new Promise((resolve) => {
+        const parts = command.split(' ');
+        const cmd = parts[0];
+        const args = parts.slice(1);
+
+        let output = '';
+        let errorOutput = '';
+
+        stream.progress(`Ejecutando: ${command}`);
+
+        const child = spawn(cmd, args, {
+            cwd,
+            shell: true,
+            env: { ...process.env, FORCE_COLOR: '0' }
+        });
+
+        child.stdout?.on('data', (data) => {
+            const text = data.toString();
+            output += text;
+            // Stream progress lines
+            const lines = text.split('\n').filter((l: string) => l.trim());
+            for (const line of lines) {
+                if (line.includes('added') || line.includes('updated') || line.includes('removed')) {
+                    stream.progress(line.substring(0, 100));
+                }
+            }
+        });
+
+        child.stderr?.on('data', (data) => {
+            const text = data.toString();
+            errorOutput += text;
+            // npm writes warnings to stderr even on success
+        });
+
+        child.on('error', (error) => {
+            logger.error('npm install process error', error);
+            resolve({ success: false, output, error: `Process error: ${error.message}` });
+        });
+
+        child.on('close', (code) => {
+            logger.info(`npm install exited with code ${code}`);
+            if (code === 0) {
+                resolve({ success: true, output, error: errorOutput });
+            } else {
+                resolve({ success: false, output, error: errorOutput || output });
+            }
+        });
+
+        token.onCancellationRequested(() => {
+            child.kill();
+            resolve({ success: false, output, error: 'Cancelled by user' });
+        });
+    });
+}
+
+/**
+ * Get package.json context for LLM analysis
+ */
+async function getPackageJsonContext(workspaceRoot: string): Promise<string> {
+    try {
+        const packageJsonPath = path.join(workspaceRoot, 'package.json');
+        if (!fs.existsSync(packageJsonPath)) {
+            return 'package.json not found';
+        }
+        const content = fs.readFileSync(packageJsonPath, 'utf-8');
+        const pkg = JSON.parse(content);
+        return JSON.stringify({
+            name: pkg.name,
+            version: pkg.version,
+            dependencies: pkg.dependencies || {},
+            devDependencies: pkg.devDependencies || {},
+            engines: pkg.engines || {}
+        }, null, 2);
+    } catch (error) {
+        return `Error reading package.json: ${error}`;
+    }
+}
+
+/**
+ * Extract a section from LLM response (e.g., "ANALISIS: ...")
+ */
+function extractSection(text: string, sectionName: string): string | null {
+    const regex = new RegExp(`${sectionName}:\\s*([\\s\\S]*?)(?=\\n[A-Z]+:|$)`, 'i');
+    const match = text.match(regex);
+    return match ? match[1].trim() : null;
+}
+
 export async function handleSetupRequest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken
@@ -133,9 +347,9 @@ export async function handleSetupRequest(
         stream.markdown(`Por favor, ejecuta el siguiente comando en el terminal:\n\n`);
         stream.markdown(`\`\`\`bash\n${setupResult.installCommand}\n\`\`\`\n\n`);
         stream.button({
-            command: 'workbench.action.terminal.sendSequence',
-            arguments: [{ text: `${setupResult.installCommand}\n` }],
-            title: '▶️ Ejecutar comando'
+            command: 'vscode.chat.open',
+            arguments: [{ query: '@spfx-tester /install' }],
+            title: '▶️ Instalar con asistencia IA'
         });
         stream.markdown(`\n\n💡 **Nota:** Este comando usa \`--legacy-peer-deps\` para evitar conflictos de dependencias peer.\n\n`);
         stream.markdown(`Las versiones han sido analizadas por IA para garantizar compatibilidad con tu proyecto.\n\n`);
@@ -164,7 +378,8 @@ export async function handleSetupRequest(
  */
 async function ensureJestEnvironment(
     workspaceRoot: string,
-    stream: vscode.ChatResponseStream
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken
 ): Promise<boolean> {
     stream.progress('Verificando entorno Jest...');
     const setupService = new ProjectSetupService();
@@ -177,7 +392,7 @@ async function ensureJestEnvironment(
 
     // Check if setup is needed
     if (!setupStatus.hasJest || setupStatus.missingDependencies.length > 0) {
-        stream.markdown(`\n❌ **Entorno Jest no está listo**\n\n`);
+        stream.markdown(`\n⚠️ **Entorno Jest no está listo**\n\n`);
         stream.markdown(`- Jest instalado: ${setupStatus.hasJest ? '✅' : '❌'}\n`);
         stream.markdown(`- Dependencias faltantes: **${setupStatus.missingDependencies.length}**\n\n`);
 
@@ -189,24 +404,19 @@ async function ensureJestEnvironment(
             stream.markdown(`\n`);
         }
 
-        stream.markdown(`### ⚠️ Acción Requerida\n\n`);
-        stream.markdown(`**No puedo generar tests sin las dependencias Jest instaladas.**\n\n`);
+        stream.markdown(`### 🔧 Instalando automáticamente...\n\n`);
         
-        if (setupStatus.installCommand) {
-            stream.markdown(`Por favor, ejecuta el siguiente comando en el terminal:\n\n`);
-            stream.markdown(`\`\`\`bash\n${setupStatus.installCommand}\n\`\`\`\n\n`);
-            stream.button({
-                command: 'workbench.action.terminal.sendSequence',
-                arguments: [{ text: `${setupStatus.installCommand}\n` }],
-                title: '▶️ Ejecutar comando'
-            });
-            stream.markdown(`\n\n`);
+        // Auto-install instead of just showing error
+        const installResult = await handleInstallRequest(stream, token, setupStatus.installCommand);
+        
+        if (installResult.errorDetails) {
+            stream.markdown(`\n⚠️ **La instalación automática falló**\n\n`);
+            stream.markdown(`No puedo continuar sin las dependencias Jest instaladas.\n`);
+            return false;
         }
         
-        stream.markdown(`**O usa:** \`@spfx-tester /setup\` para configurar el entorno paso a paso.\n\n`);
-        stream.markdown(`Después de instalar las dependencias, vuelve a ejecutar \`/generate-all\`.\n`);
-        
-        return false;
+        stream.markdown(`\n✅ **Dependencias instaladas correctamente**\n\n`);
+        return true;
     } else {
         stream.markdown(`✅ Entorno Jest listo\n\n`);
         return true;
@@ -261,7 +471,7 @@ export async function handleGenerateSingleRequest(
     logger.info('Workspace identified', { workspaceRoot });
 
     // ✨ Check and setup Jest environment if needed
-    const envReady = await ensureJestEnvironment(workspaceRoot, stream);
+    const envReady = await ensureJestEnvironment(workspaceRoot, stream, token);
     if (!envReady) {
         return { metadata: { command: 'generate' } };
     }
@@ -356,7 +566,7 @@ export async function handleGenerateAllRequest(
         return { metadata: { command: 'generate-all' } };
     }
     
-    const envReady = await ensureJestEnvironment(firstProjectRoot, stream);
+    const envReady = await ensureJestEnvironment(firstProjectRoot, stream, token);
     if (!envReady) {
         return { metadata: { command: 'generate-all' } };
     }

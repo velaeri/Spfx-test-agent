@@ -213,14 +213,21 @@ If ALL packages are already installed, return:
         );
 
         try {
-            const jsonMatch = result.code.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                this.logger.warn('LLM did not return valid JSON', { response: result.code.substring(0, 200) });
+            // Extract JSON using robust method
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            this.logger.debug('Extracted JSON from LLM response', { length: jsonStr.length, preview: jsonStr.substring(0, 100) });
+            const versions = JSON.parse(jsonStr);
+            
+            // Validate it's an object (not array or primitive)
+            if (typeof versions !== 'object' || Array.isArray(versions)) {
+                this.logger.warn('LLM returned non-object JSON, ignoring');
                 return {};
             }
-            return JSON.parse(jsonMatch[0]);
+            
+            this.logger.info('Successfully parsed LLM dependency recommendations', { count: Object.keys(versions).length });
+            return versions;
         } catch (error) {
-            this.logger.error('Failed to parse LLM response for dependencies', error);
+            this.logger.error('Failed to parse LLM response for dependencies', { error, rawResponse: result.code.substring(0, 500) });
             return {};
         }
     }
@@ -259,8 +266,29 @@ If ALL packages are already installed, return:
     }
 
     private extractCodeFromMarkdown(text: string): string {
-        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\s*([\s\S]*?)\s*```/;
+        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js|json)?\s*([\s\S]*?)\s*```/;
         const match = text.match(codeBlockRegex);
         return match ? match[1].trim() : text.trim();
+    }
+
+    /**
+     * Extract JSON from LLM response (more robust for mixed text + JSON)
+     */
+    private extractJsonFromResponse(text: string): string {
+        // First, try to find JSON in markdown code blocks
+        const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
+        const blockMatch = text.match(jsonBlockRegex);
+        if (blockMatch) {
+            return blockMatch[1].trim();
+        }
+
+        // If no code block, look for raw JSON (find first { to last })
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            return jsonMatch[0].trim();
+        }
+
+        // Fallback: return as-is and let JSON.parse fail with better error
+        return text.trim();
     }
 }

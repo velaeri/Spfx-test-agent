@@ -80,18 +80,42 @@ export async function handleInstallRequest(
         const llmProvider = LLMProviderFactory.createProvider();
         
         try {
-            // Use fixTest instead of generateTest for better error analysis
-            const llmResult = await llmProvider.fixTest({
-                sourceCode: await getPackageJsonContext(workspaceRoot),
-                fileName: 'package.json',
-                currentTestCode: commandToRun,
-                errorContext: result.error.substring(0, 3000), // Limit error size
-                systemPrompt: `Eres un experto en resolver conflictos de dependencias npm. 
-Analiza errores de npm install y sugiere versiones compatibles.
-Responde SIEMPRE con:
-1. ANALISIS: [explicación del problema]
-2. COMANDO: [comando npm install completo con versiones específicas]`
+            // Simplified prompt to avoid LLM rejection
+            const pkgContext = await getPackageJsonContext(workspaceRoot);
+            const errorSummary = extractNpmErrorSummary(result.error);
+            
+            const simplePrompt = `Task: Suggest compatible npm package versions for a Jest testing setup.
+
+Current package.json:
+${pkgContext}
+
+Installation error summary:
+${errorSummary}
+
+Please provide:
+1. Brief explanation of the version conflict
+2. A complete npm install command with specific compatible versions
+
+Format your response as:
+ANALISIS: [brief explanation]
+COMANDO: npm install --save-dev --legacy-peer-deps [package@version ...]`;
+
+            stream.progress('Consultando al LLM...');
+            
+            // Use generateTest as a generic LLM query method
+            const llmResult = await llmProvider.generateTest({
+                sourceCode: simplePrompt,
+                fileName: 'npm-error-analysis.txt',
+                systemPrompt: 'You are a helpful npm dependency resolution assistant. Analyze package version conflicts and suggest compatible versions for Jest testing libraries.'
             });
+
+            // Check if LLM refused to answer
+            if (llmResult.code.toLowerCase().includes("sorry") && llmResult.code.toLowerCase().includes("can't assist")) {
+                stream.markdown('⚠️ **El LLM rechazó la solicitud de análisis**\n\n');
+                stream.markdown('Esto puede ocurrir por políticas de seguridad del modelo.\n\n');
+                suggestManualFix(stream, result.error, commandToRun);
+                return { errorDetails: { message: 'npm install failed' } };
+            }
 
             // Try to extract structured response
             let analysis = extractSection(llmResult.code, 'ANALISIS');
@@ -124,18 +148,14 @@ Responde SIEMPRE con:
                 });
                 stream.markdown('\n\n');
             } else {
-                stream.markdown('⚠️ El LLM no pudo generar un comando alternativo específico.\n');
-                stream.markdown('💡 **Sugerencias generales:**\n');
-                stream.markdown('- Revisa los conflictos de peer dependencies en el error\n');
-                stream.markdown('- Intenta con `--force` si `--legacy-peer-deps` no funciona\n');
-                stream.markdown('- Verifica que las versiones de React/TypeScript sean compatibles\n');
+                suggestManualFix(stream, result.error, commandToRun);
             }
 
         } catch (llmError) {
             logger.error('LLM analysis failed', llmError);
             stream.markdown('⚠️ El análisis automático con IA falló.\n\n');
             stream.markdown(`**Error del LLM:** ${llmError instanceof Error ? llmError.message : 'Unknown'}\n\n`);
-            stream.markdown('💡 Por favor, revisa el error de npm arriba y ajusta las versiones manualmente.\n');
+            suggestManualFix(stream, result.error, commandToRun);
         }
 
         return { errorDetails: { message: 'npm install failed' } };
@@ -236,6 +256,67 @@ function extractSection(text: string, sectionName: string): string | null {
     const regex = new RegExp(`${sectionName}:\\s*([\\s\\S]*?)(?=\\n[A-Z]+:|$)`, 'i');
     const match = text.match(regex);
     return match ? match[1].trim() : null;
+}
+
+/**
+ * Extract key information from npm error for LLM analysis
+ */
+function extractNpmErrorSummary(errorText: string): string {
+    const lines = errorText.split('\n');
+    const relevantLines: string[] = [];
+    
+    // Extract key error lines (ETARGET, ERESOLVE, peer dependency conflicts, etc.)
+    for (const line of lines) {
+        if (line.includes('npm error') || 
+            line.includes('ERESOLVE') ||
+            line.includes('ETARGET') ||
+            line.includes('peer dep') ||
+            line.includes('notarget') ||
+            line.includes('Could not resolve')) {
+            relevantLines.push(line);
+        }
+        if (relevantLines.length >= 15) break; // Limit to first 15 key lines
+    }
+    
+    return relevantLines.length > 0 ? relevantLines.join('\n') : errorText.substring(0, 1000);
+}
+
+/**
+ * Show manual fix suggestions when LLM can't help
+ */
+function suggestManualFix(stream: vscode.ChatResponseStream, error: string, originalCommand: string): void {
+    stream.markdown('💡 **Sugerencias para resolver manualmente:**\n\n');
+    
+    // Analyze error type and give specific advice
+    if (error.includes('ETARGET') || error.includes('notarget')) {
+        stream.markdown('**Error ETARGET/notarget:** No se encontró la versión especificada.\n\n');
+        stream.markdown('Soluciones:\n');
+        stream.markdown('1. Usa versiones con rango flexible: `@types/jest@^28.0.0` en lugar de `@28.0.8`\n');
+        stream.markdown('2. Verifica versiones disponibles: `npm view <package> versions`\n');
+        stream.markdown('3. Prueba con versión latest: `npm install --save-dev <package>@latest`\n\n');
+    } else if (error.includes('ERESOLVE') || error.includes('peer dep')) {
+        stream.markdown('**Error ERESOLVE/peer dependency:** Conflicto de versiones entre paquetes.\n\n');
+        stream.markdown('Soluciones:\n');
+        stream.markdown('1. Usa `--force` si `--legacy-peer-deps` no funciona\n');
+        stream.markdown('2. Revisa qué versión de React/TypeScript tienes instalada\n');
+        stream.markdown('3. Instala las dependencias que coincidan con tu versión de React\n\n');
+    } else {
+        stream.markdown('Soluciones generales:\n');
+        stream.markdown('- Revisa el error completo arriba para identificar el paquete problemático\n');
+        stream.markdown('- Intenta instalar los paquetes uno por uno para identificar el conflicto\n');
+        stream.markdown('- Verifica las versiones compatibles en npmjs.com\n\n');
+    }
+    
+    // Suggest alternative commands
+    stream.markdown('**Comandos alternativos a probar:**\n\n');
+    
+    if (!originalCommand.includes('--force')) {
+        const forceCommand = originalCommand.replace('--legacy-peer-deps', '--force');
+        stream.markdown(`\`\`\`bash\n${forceCommand}\n\`\`\`\n\n`);
+    }
+    
+    stream.markdown('O instala Jest 28 compatible con tu proyecto:\n');
+    stream.markdown('```bash\nnpm install --save-dev --legacy-peer-deps jest@^28.0.0 @types/jest@^28.0.0 ts-jest@^28.0.0\n```\n\n');
 }
 
 export async function handleSetupRequest(

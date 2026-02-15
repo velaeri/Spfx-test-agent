@@ -60,6 +60,10 @@
           {
             "name": "generate-all",
             "description": "Generate tests for all source files in the workspace"
+          },
+          {
+            "name": "generate-quality",
+            "description": "Generate high-quality tests using the golden policy pipeline (any JS/TS project)"
           }
         ]
       }

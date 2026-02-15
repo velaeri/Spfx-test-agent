@@ -1338,6 +1338,76 @@ export async function handleGenerateAllRequest(
     return { metadata: { command: 'generate-all' } };
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// /generate-quality — Golden policy quality pipeline (any project)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Handle /generate-quality command — runs the quality pipeline.
+ *
+ * Works on any JS/TS project. Detects stack, config, and mocks dynamically.
+ *
+ * This orchestrates:
+ * 1. Repo inspection (detect stack, config, mocks, helpers)
+ * 2. Test plan (P0/P1/P2 priority ordering)
+ * 3. Prompt assembly (policy + stack + tiers + templates)
+ * 4. Per-file generation → repair loop → quality gates
+ * 5. Coverage report (execution-capable mode only)
+ */
+export async function handleGenerateQualityRequest(
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    targetPath?: string,
+    config?: Partial<import('./orchestrator/QualityPipeline').PipelineConfig>
+): Promise<vscode.ChatResult> {
+    telemetryService.trackCommandExecution('generate-quality');
+
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+        throw new WorkspaceNotFoundError();
+    }
+
+    // Resolve repo root: explicit path > first workspace
+    const repoRoot = targetPath || workspaceFolders[0].uri.fsPath;
+
+    stream.markdown('## 🧪 Quality Test Pipeline\n\n');
+    stream.markdown(`**Repo root:** \`${repoRoot}\`\n\n`);
+
+    // Lazy-import to avoid circular deps at module level
+    const { QualityPipeline } = await import('./orchestrator/QualityPipeline');
+    const llmProvider = LLMProviderFactory.createProvider();
+    const pipeline = new QualityPipeline(llmProvider);
+
+    try {
+        const result = await pipeline.execute(repoRoot, stream, token, config);
+
+        // ── Final summary ────────────────────────────────
+        stream.markdown('\n---\n\n## 📋 Resumen Final\n\n');
+        stream.markdown(`| Métrica | Valor |\n|---------|-------|\n`);
+        stream.markdown(`| Modo | ${result.mode} |\n`);
+        stream.markdown(`| Tests creados | ${result.testsCreated.length} |\n`);
+        stream.markdown(`| Tests reparados | ${result.testsRepaired.length} |\n`);
+        stream.markdown(`| Tests eliminados | ${result.testsDeleted.length} |\n`);
+        stream.markdown(`| Pasando | ${result.testsPassing} |\n`);
+        stream.markdown(`| Fallando | ${result.testsFailing} |\n`);
+        if (result.coverageAfter !== null) {
+            stream.markdown(`| Cobertura | ${result.coverageAfter.toFixed(1)}% |\n`);
+        }
+        stream.markdown(`| Tiempo total | ${(result.elapsed / 1000).toFixed(1)}s |\n`);
+        if (result.aborted) {
+            stream.markdown(`| ⚠️ Abortado | ${result.abortReason} |\n`);
+        }
+        stream.markdown('\n');
+
+        return { metadata: { command: 'generate-quality', result } };
+    } catch (error) {
+        logger.error('Quality pipeline failed', error);
+        const msg = error instanceof Error ? error.message : String(error);
+        stream.markdown(`\n❌ **Pipeline failed:** ${msg}\n`);
+        return { errorDetails: { message: msg } };
+    }
+}
+
 /**
  * Centralized error handling with user-friendly messages
  */

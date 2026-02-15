@@ -9,7 +9,8 @@ import {
     handleSetupRequest,
     handleInstallRequest,
     handleGenerateAllRequest, 
-    handleGenerateSingleRequest, 
+    handleGenerateSingleRequest,
+    handleGenerateQualityRequest,
     handleError 
 } from './ChatHandlers';
 import { LLMOrchestrator } from './orchestrator/LLMOrchestrator';
@@ -186,6 +187,10 @@ async function handleChatRequest(
         
         if (request.command === 'generate-all') {
             return await handleGenerateAllRequest(stream, token, stateService, targetPath, orchestrator);
+        }
+
+        if (request.command === 'generate-quality') {
+            return await handleGenerateQualityRequest(stream, token, targetPath);
         }
 
         // Single-file generation via orchestrator

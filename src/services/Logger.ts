@@ -19,7 +19,7 @@ export class Logger {
     private logLevel: LogLevel = LogLevel.INFO;
 
     private constructor() {
-        this.outputChannel = vscode.window.createOutputChannel('SPFX Test Agent');
+        this.outputChannel = vscode.window.createOutputChannel('Test Agent');
     }
 
     /**

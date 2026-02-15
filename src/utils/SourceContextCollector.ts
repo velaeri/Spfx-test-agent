@@ -18,8 +18,8 @@ export interface SourceContext {
     jestConfig?: string;
     /** The package.json (dependencies section only) */
     packageDeps?: Record<string, string>;
-    /** SPFx-specific context detected */
-    spfxPatterns: string[];
+    /** Framework-specific context detected */
+    frameworkPatterns: string[];
 }
 
 /**
@@ -52,7 +52,7 @@ export class SourceContextCollector {
             sourceCode,
             fileName,
             dependencies: new Map(),
-            spfxPatterns: []
+            frameworkPatterns: []
         };
 
         // 1. Resolve and read local import dependencies
@@ -87,10 +87,10 @@ export class SourceContextCollector {
             } catch { /* ignore */ }
         }
 
-        // 5. Detect SPFx patterns
-        context.spfxPatterns = this.detectSPFxPatterns(sourceCode, context.packageDeps);
+        // 5. Detect framework patterns
+        context.frameworkPatterns = this.detectFrameworkPatterns(sourceCode, context.packageDeps);
 
-        this.logger.info(`Context collected: ${context.dependencies.size} dependencies, ${context.spfxPatterns.length} SPFx patterns`);
+        this.logger.info(`Context collected: ${context.dependencies.size} dependencies, ${context.frameworkPatterns.length} framework patterns`);
 
         return context;
     }
@@ -194,11 +194,12 @@ export class SourceContextCollector {
     }
 
     /**
-     * Detect SPFx-specific patterns in the source code
+     * Detect framework-specific patterns in the source code
      */
-    private detectSPFxPatterns(sourceCode: string, deps?: Record<string, string>): string[] {
+    private detectFrameworkPatterns(sourceCode: string, deps?: Record<string, string>): string[] {
         const patterns: string[] = [];
 
+        // SPFx patterns
         if (sourceCode.includes('BaseClientSideWebPart')) {
             patterns.push('SPFx WebPart (extends BaseClientSideWebPart)');
         }
@@ -217,12 +218,44 @@ export class SourceContextCollector {
         if (sourceCode.includes('@pnp/sp') || sourceCode.includes('@pnp/spfx-controls')) {
             patterns.push('Uses PnP JS for SharePoint operations');
         }
+
+        // React patterns
         if (sourceCode.includes('React.Component') || sourceCode.includes('React.FC') || sourceCode.includes('FunctionComponent')) {
             patterns.push('React Component');
         }
         if (sourceCode.includes('@fluentui/react') || sourceCode.includes('office-ui-fabric-react')) {
             patterns.push('Uses Fluent UI / Office UI Fabric components');
         }
+
+        // Angular patterns
+        if (sourceCode.includes('@Component') || sourceCode.includes('@Injectable')) {
+            patterns.push('Angular Component/Service');
+        }
+
+        // Vue patterns
+        if (sourceCode.includes('defineComponent') || sourceCode.includes('<script setup')) {
+            patterns.push('Vue Component');
+        }
+
+        // Next.js patterns
+        if (sourceCode.includes('getServerSideProps') || sourceCode.includes('getStaticProps')) {
+            patterns.push('Next.js page with data fetching');
+        }
+        if (sourceCode.includes("'use client'") || sourceCode.includes('"use client"')) {
+            patterns.push('Next.js Client Component');
+        }
+
+        // Express patterns
+        if (sourceCode.includes('express()') || sourceCode.includes('Router()') || sourceCode.includes('app.get(') || sourceCode.includes('app.post(')) {
+            patterns.push('Express.js route/server');
+        }
+
+        // VS Code extension patterns
+        if (sourceCode.includes('vscode.commands') || sourceCode.includes('vscode.window') || sourceCode.includes('vscode.workspace')) {
+            patterns.push('VS Code Extension API usage');
+        }
+
+        // General patterns
         if (sourceCode.includes('WebPartContext') || sourceCode.includes('this.context')) {
             patterns.push('Uses WebPart context (needs mocking)');
         }
@@ -230,7 +263,7 @@ export class SourceContextCollector {
             patterns.push('Uses CSS/SCSS modules (needs identity-obj-proxy mock)');
         }
 
-        // Check package.json for SPFx version
+        // Check package.json for framework version info
         if (deps) {
             const spfxVersion = deps['@microsoft/sp-core-library'] || deps['@microsoft/sp-webpart-base'];
             if (spfxVersion) {
@@ -239,6 +272,14 @@ export class SourceContextCollector {
             const reactVersion = deps['react'];
             if (reactVersion) {
                 patterns.push(`React version: ${reactVersion}`);
+            }
+            const angularVersion = deps['@angular/core'];
+            if (angularVersion) {
+                patterns.push(`Angular version: ${angularVersion}`);
+            }
+            const vueVersion = deps['vue'];
+            if (vueVersion) {
+                patterns.push(`Vue version: ${vueVersion}`);
             }
         }
 
@@ -251,11 +292,11 @@ export class SourceContextCollector {
     formatForPrompt(context: SourceContext): string {
         const parts: string[] = [];
 
-        // SPFx patterns detected
-        if (context.spfxPatterns.length > 0) {
+        // Framework patterns detected
+        if (context.frameworkPatterns.length > 0) {
             parts.push(`## Project Context`);
-            parts.push(`This is a SharePoint Framework (SPFx) project with these characteristics:`);
-            context.spfxPatterns.forEach(p => parts.push(`- ${p}`));
+            parts.push(`Detected framework patterns:`);
+            context.frameworkPatterns.forEach(p => parts.push(`- ${p}`));
             parts.push('');
         }
 
@@ -272,19 +313,16 @@ export class SourceContextCollector {
             }
         }
 
-        // Package dependencies (just the names for context)
+        // Package dependencies — show ALL relevant deps, not just hardcoded list
         if (context.packageDeps) {
-            const relevantDeps = Object.keys(context.packageDeps)
-                .filter(d => d.startsWith('@microsoft/sp-') || 
-                            d.startsWith('@fluentui') || 
-                            d.startsWith('@pnp') || 
-                            d === 'react' || 
-                            d === 'react-dom' ||
-                            d.startsWith('@testing-library') ||
-                            d === 'jest' ||
-                            d === 'ts-jest');
-            if (relevantDeps.length > 0) {
-                parts.push(`## Installed Packages (relevant)`);
+            const allDeps = Object.keys(context.packageDeps);
+            if (allDeps.length > 0) {
+                parts.push(`## Installed Packages`);
+                // Show all deps (limited to meaningful ones, skip internal types)
+                const relevantDeps = allDeps.filter(d => 
+                    !d.startsWith('@types/node') && 
+                    d !== 'typescript'
+                ).slice(0, 30); // Cap at 30 for prompt size
                 relevantDeps.forEach(d => parts.push(`- ${d}: ${context.packageDeps![d]}`));
                 parts.push('');
             }

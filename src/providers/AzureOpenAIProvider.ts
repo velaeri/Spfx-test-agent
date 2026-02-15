@@ -1,5 +1,6 @@
 import { OpenAIClient, AzureKeyCredential } from "@azure/openai";
 import { ILLMProvider, TestContext, LLMResult } from '../interfaces/ILLMProvider';
+import { CoreLLMResult } from '../interfaces/ICoreProvider';
 import { Logger } from '../services/Logger';
 import { ConfigService } from '../services/ConfigService';
 import { PROMPTS } from '../utils/prompts';
@@ -36,6 +37,35 @@ export class AzureOpenAIProvider implements ILLMProvider {
         return 'Azure OpenAI';
     }
 
+    /**
+     * Get the vendor ID (implements ICoreProvider)
+     */
+    public getVendorId(): string {
+        return 'azure-openai';
+    }
+
+    /**
+     * Generic prompt sending method (implements ICoreProvider)
+     * This is the core interface for all LLM interactions in the new architecture
+     */
+    public async sendPrompt(
+        systemPrompt: string, 
+        userPrompt: string, 
+        options?: any
+    ): Promise<CoreLLMResult> {
+        this.logger.debug('[AzureOpenAIProvider] sendPrompt called');
+
+        const result = await this.sendRequest(systemPrompt, userPrompt);
+        
+        // Convert LLMResult to CoreLLMResult
+        return {
+            content: result.code,
+            model: result.model,
+            tokensUsed: result.tokensUsed,
+            metadata: options
+        };
+    }
+
     public async isAvailable(): Promise<boolean> {
         return !!this.client;
     }
@@ -43,12 +73,8 @@ export class AzureOpenAIProvider implements ILLMProvider {
     public async generateTest(context: TestContext): Promise<LLMResult> {
         if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
 
-        const systemPrompt = PROMPTS.SYSTEM;
-        const userPrompt = PROMPTS.GENERATE_TEST(
-            context.fileName, 
-            context.sourceCode,
-            context.dependencyContext || ''
-        );
+        const systemPrompt = context.systemPrompt || PROMPTS.SYSTEM;
+        const userPrompt = PROMPTS.GENERATE_TEST(context.fileName, context.sourceCode, context.dependencyContext);
 
         return await this.sendRequest(systemPrompt, userPrompt);
     }
@@ -59,17 +85,18 @@ export class AzureOpenAIProvider implements ILLMProvider {
 
         const attemptStr = `${context.attempt || 1}${context.maxAttempts ? `/${context.maxAttempts}` : ''}`;
 
-        const userPrompt = PROMPTS.FIX_TEST(
-            attemptStr, 
-            context.fileName, 
-            context.currentTestCode || '',
-            context.errorContext,
-            context.sourceCode,
-            context.dependencyContext || '',
-            context.environmentHints || ''
-        );
+        const errorContext = context.errorContext || '';
+        const isSyntaxError = errorContext.includes('SyntaxError') || errorContext.includes('Unexpected token') || errorContext.includes('Missing semicolon');
+        const isMockError = errorContext.includes('jest.mock') || errorContext.includes('@fluentui') || errorContext.includes('@microsoft') || errorContext.includes('vscode');
 
-        return await this.sendRequest(PROMPTS.SYSTEM, userPrompt);
+        let specificGuidance = '';
+        if (isSyntaxError && isMockError) {
+            specificGuidance = PROMPTS.FIX_SPECIFIC_GUIDANCE_MOCK_TYPES;
+        }
+
+        const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, context.currentTestCode || '', errorContext, specificGuidance, context.sourceCode);
+
+        return await this.sendRequest(context.systemPrompt || PROMPTS.SYSTEM, userPrompt);
     }
 
     public async analyzeAndFixError(
@@ -163,6 +190,12 @@ If no packages need installing, use empty array. If no commands needed, omit the
     public async detectDependencies(packageJsonContent: any): Promise<Record<string, string>> {
         if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
         
+        // Extract stack analysis if provided by DependencyDetectionService
+        const stackInfo = packageJsonContent._stackAnalysis;
+        const stackContext = stackInfo
+            ? `\n\n**Project stack analysis (deterministic):**\n- Framework: ${stackInfo.framework}\n- UI library: ${stackInfo.uiLibrary}\n- Language: ${stackInfo.language}\n- Uses JSX: ${stackInfo.usesJsx}\n- Has React: ${stackInfo.hasReact}\n- Has Angular: ${stackInfo.hasAngular}\n- Has Vue: ${stackInfo.hasVue}\n- Test runner: ${stackInfo.testRunner}\n\nBase your recommendations on this analysis. Only suggest packages relevant to this specific stack.`
+            : '';
+
         const prompt = `Analyze this package.json and determine which Jest testing dependencies are missing or need to be installed.
 
 **Current package.json dependencies:**
@@ -171,28 +204,34 @@ ${JSON.stringify({
     dependencies: packageJsonContent.dependencies || {},
     devDependencies: packageJsonContent.devDependencies || {}
 }, null, 2)}
-\`\`\`
+\`\`\`${stackContext}
 
 **Task:** 
 1. Analyze the EXISTING dependencies to determine what Jest packages are already installed
-2. Determine what ADDITIONAL packages (if any) are needed for a complete Jest + React Testing Library setup
-3. For any missing packages, recommend versions that are COMPATIBLE with the existing dependencies
+2. Use the stack analysis above to determine what type of project this is
+3. Only recommend packages relevant to the detected project type
 
-**Required packages for full Jest + React Testing Library:**
+**Always required (universal Jest packages):**
 - jest
-- @types/jest  
+- @types/jest
 - ts-jest
+
+**Only if the project uses React (has react in dependencies):**
 - @testing-library/react
 - @testing-library/jest-dom
-- @testing-library/user-event
-- react-test-renderer
-- @types/react-test-renderer
+
+**Only if the project needs jsdom testEnvironment (React, browser-based projects):**
+- jest-environment-jsdom
 - identity-obj-proxy
+
+**IMPORTANT:**
+- Do NOT suggest React-specific packages if React is NOT in the project's dependencies.
+- For Node.js CLIs, VS Code extensions, APIs: ONLY suggest jest, @types/jest, ts-jest.
 
 **CRITICAL RULES:**
 1. ONLY include packages that are NOT already installed
-2. If a package is already installed (even if different version), do NOT include it in the response
-3. Ensure version compatibility with existing React version and other dependencies
+2. If a package is already installed (even if different version), do NOT include it
+3. Ensure version compatibility with existing dependencies
 4. If Jest is already installed, match its major version for related packages
 5. Return ONLY a valid JSON object with MISSING packages, or empty object {} if nothing is missing
 6. Use specific version ranges (e.g., "^28.1.0" not "latest")
@@ -216,14 +255,21 @@ If ALL packages are already installed, return:
         );
 
         try {
-            const jsonMatch = result.code.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-                this.logger.warn('LLM did not return valid JSON', { response: result.code.substring(0, 200) });
+            // Extract JSON using robust method
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            this.logger.debug('Extracted JSON from LLM response', { length: jsonStr.length, preview: jsonStr.substring(0, 100) });
+            const versions = JSON.parse(jsonStr);
+            
+            // Validate it's an object (not array or primitive)
+            if (typeof versions !== 'object' || Array.isArray(versions)) {
+                this.logger.warn('LLM returned non-object JSON, ignoring');
                 return {};
             }
-            return JSON.parse(jsonMatch[0]);
+            
+            this.logger.info('Successfully parsed LLM dependency recommendations', { count: Object.keys(versions).length });
+            return versions;
         } catch (error) {
-            this.logger.error('Failed to parse LLM response for dependencies', error);
+            this.logger.error('Failed to parse LLM response for dependencies', { error, rawResponse: result.code.substring(0, 500) });
             return {};
         }
     }
@@ -262,8 +308,125 @@ If ALL packages are already installed, return:
     }
 
     private extractCodeFromMarkdown(text: string): string {
-        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\s*([\s\S]*?)\s*```/;
+        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js|json)?\s*([\s\S]*?)\s*```/;
         const match = text.match(codeBlockRegex);
         return match ? match[1].trim() : text.trim();
+    }
+
+    /**
+     * Extract JSON from LLM response (more robust for mixed text + JSON)
+     */
+    private extractJsonFromResponse(text: string): string {
+        // First, try to find JSON in markdown code blocks
+        const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/;
+        const blockMatch = text.match(jsonBlockRegex);
+        if (blockMatch) {
+            return blockMatch[1].trim();
+        }
+
+        // If no code block, look for raw JSON (find first { to last })
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            return jsonMatch[0].trim();
+        }
+
+        // Fallback: return as-is and let JSON.parse fail with better error
+        return text.trim();
+    }
+
+    // ===== LLM-First Planning Methods =====
+
+    public async planTestStrategy(context: {
+        sourceCode: string;
+        fileName: string;
+        projectAnalysis: any;
+        existingTestPatterns?: string[];
+    }): Promise<any> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info(`Planning test strategy for ${context.fileName}`);
+
+        const prompt = `Analyze this source file and plan an optimal testing strategy.
+
+**File:** ${context.fileName}
+**Source Code:**
+\`\`\`typescript
+${context.sourceCode.substring(0, 3000)}
+\`\`\`
+
+**Task:** Return JSON with:
+- \`approach\`: "unit" | "integration" | "component"
+- \`mockingStrategy\`: "minimal" | "moderate" | "extensive"
+- \`mocksNeeded\`: array
+- \`testStructure\`: string
+- \`expectedCoverage\`: number
+- \`potentialIssues\`: array
+- \`estimatedIterations\`: number
+
+Return ONLY valid JSON.`;
+
+        const result = await this.sendRequest("You are a test planning expert. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to plan test strategy', error);
+            return { approach: 'unit', mockingStrategy: 'moderate', mocksNeeded: [], testStructure: 'standard', expectedCoverage: 80, potentialIssues: [], estimatedIterations: 2 };
+        }
+    }
+
+    public async generateJestConfig(context: { projectAnalysis: any; requirements: string[]; }): Promise<any> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info('Generating Jest config');
+
+        const prompt = `Generate Jest configuration files. Return JSON with: \`configJs\`, \`setupJs\`, \`mocks\`, \`explanation\`.`;
+
+        const result = await this.sendRequest("You are a Jest expert. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to generate Jest config', error);
+            throw error;
+        }
+    }
+
+    public async planBatchGeneration(context: { allFiles: string[]; projectStructure: any; existingTests: string[]; dependencies: Record<string, string[]>; }): Promise<any> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info(`Planning batch for ${context.allFiles.length} files`);
+
+        const prompt = `Plan batch generation. Return JSON with: \`groups\`, \`estimatedTime\`, \`recommendedConcurrency\`.`;
+
+        const result = await this.sendRequest("You are a test planner. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to plan batch', error);
+            return { groups: [{ name: 'All', priority: 3, files: context.allFiles, reason: 'Sequential' }], estimatedTime: `${Math.ceil(context.allFiles.length * 45 / 60)} min`, recommendedConcurrency: 1 };
+        }
+    }
+
+    public async validateAndFixVersions(context: { suggestedVersions: Record<string, string>; validationErrors: string[]; }): Promise<Record<string, string>> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        
+        this.logger.info('Validating versions');
+
+        const prompt = `Fix invalid npm versions. Return corrected JSON.`;
+
+        const result = await this.sendRequest("You are an npm expert. Return only JSON.", prompt);
+
+        try {
+            const jsonStr = this.extractJsonFromResponse(result.code);
+            return JSON.parse(jsonStr);
+        } catch (error) {
+            this.logger.error('Failed to fix versions', error);
+            return context.suggestedVersions;
+        }
     }
 }

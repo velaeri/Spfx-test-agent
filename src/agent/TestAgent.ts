@@ -3,16 +3,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { TestRunner } from '../utils/TestRunner';
 import { JestLogParser } from '../utils/JestLogParser';
-import { ILLMProvider } from '../interfaces/ILLMProvider';
+import { ILLMProvider, ProjectAnalysis, TestStrategy } from '../interfaces/ILLMProvider';
+import { CopilotProvider } from '../providers/CopilotProvider';
+import { AzureOpenAIProvider } from '../providers/AzureOpenAIProvider';
 import { Logger } from '../services/Logger';
 import { ConfigService } from '../services/ConfigService';
 import { StateService, TestGenerationHistory } from '../services/StateService';
 import { ProjectSetupService } from '../services/ProjectSetupService';
-import { JestConfigurationService } from '../services/JestConfigurationService';
-import { PackageInstallationService } from '../services/PackageInstallationService';
-import { DependencyDetectionService } from '../services/DependencyDetectionService';
 import { TelemetryService } from '../services/TelemetryService';
 import { SourceContextCollector } from '../utils/SourceContextCollector';
+import { StackDiscoveryService, ProjectStack } from '../services/StackDiscoveryService';
+import { PROMPTS } from '../utils/prompts';
 import { 
     JestNotFoundError, 
     TestGenerationError, 
@@ -21,16 +22,13 @@ import {
 } from '../errors/CustomErrors';
 
 /**
- * TestAgent - Core agentic workflow for automated SPFx test generation
+ * TestAgent - Core agentic workflow for automated test generation
  * 
- * This agent implements an intelligent self-healing loop:
- * 1. Collects full context: source file + imports + dependencies + project config
- * 2. Generates a test file using LLM with all context
- * 3. Executes ONLY the target test file using Jest
- * 4. If test fails, detects whether it's infrastructure vs code issue
- * 5. For infrastructure issues: auto-fixes (e.g., jsdom version)
- * 6. For code issues: sends error + current test + source + deps to LLM for fix
- * 7. Repeats up to N times until test passes
+ * This agent implements a self-healing loop:
+ * 1. Generates a test file using LLM (GPT-4 via Copilot or other providers)
+ * 2. Executes the test using Jest
+ * 3. If test fails, parses the error and asks LLM to fix it
+ * 4. Repeats up to N times until test passes (configurable)
  */
 export class TestAgent {
     private testRunner: TestRunner;
@@ -38,23 +36,37 @@ export class TestAgent {
     private logger: Logger;
     private stateService?: StateService;
     private setupService: ProjectSetupService;
-    private configService: JestConfigurationService;
-    private packageService: PackageInstallationService;
-    private dependencyService: DependencyDetectionService;
     private telemetryService: TelemetryService;
     private contextCollector: SourceContextCollector;
+    private stackDiscovery: StackDiscoveryService;
+    private detectedStack?: ProjectStack;
 
-    constructor(llmProvider: ILLMProvider, stateService?: StateService) {
+    constructor(llmProvider?: ILLMProvider, stateService?: StateService) {
         this.testRunner = new TestRunner();
         this.logger = Logger.getInstance();
         this.setupService = new ProjectSetupService();
-        this.configService = new JestConfigurationService();
-        this.packageService = new PackageInstallationService();
-        this.dependencyService = new DependencyDetectionService();
         this.telemetryService = TelemetryService.getInstance();
         this.contextCollector = new SourceContextCollector();
+        this.stackDiscovery = new StackDiscoveryService();
         
-        this.llmProvider = llmProvider;
+        // Use provided LLM provider or create default Copilot provider
+        if (llmProvider) {
+            this.llmProvider = llmProvider;
+        } else {
+            const config = ConfigService.getConfig();
+            
+            // Check if Azure OpenAI is configured
+            const hasAzureConfig = config.azureOpenAI?.endpoint && 
+                                 config.azureOpenAI?.apiKey && 
+                                 config.azureOpenAI?.deploymentName;
+
+            if (hasAzureConfig) {
+                this.llmProvider = new AzureOpenAIProvider();
+            } else {
+                this.llmProvider = new CopilotProvider(config.llmVendor, config.llmFamily);
+            }
+        }
+
         this.stateService = stateService;
         
         this.logger.info(`TestAgent initialized with provider: ${this.llmProvider.getProviderName()}`);
@@ -62,6 +74,12 @@ export class TestAgent {
 
     /**
      * Main method: Generate and heal a test file for a given source file
+     * 
+     * @param sourceFilePath - Absolute path to the source file (e.g., MyComponent.tsx)
+     * @param workspaceRoot - Root directory of the workspace
+     * @param stream - VS Code chat response stream for progress updates
+     * @param mode - Generation mode (fast/balanced/thorough), defaults to balanced
+     * @returns Path to the generated test file
      */
     async generateAndHealTest(
         sourceFilePath: string,
@@ -71,161 +89,221 @@ export class TestAgent {
     ): Promise<string> {
         const config = ConfigService.getConfig();
         
-        // Mode determines max healing attempts
-        let maxAttempts: number;
+        // Override maxHealingAttempts based on mode
+        let effectiveMaxAttempts = config.maxHealingAttempts;
         let shouldExecuteTests = true;
         
         switch (mode) {
             case 'fast':
-                maxAttempts = 0;
+                effectiveMaxAttempts = 0;
                 shouldExecuteTests = false;
                 break;
             case 'balanced':
-                maxAttempts = config.maxHealingAttempts; // Use configured value (default 3)
+                effectiveMaxAttempts = 1;
                 break;
             case 'thorough':
-                maxAttempts = Math.max(config.maxHealingAttempts, 5);
+                effectiveMaxAttempts = 3;
                 break;
-            default:
-                maxAttempts = config.maxHealingAttempts;
         }
-
         const startTime = Date.now();
         const errorPatterns: string[] = [];
 
         this.telemetryService.trackCommandExecution('generate');
 
-        // Validate source file
+        // Validate source file path
         this.validateSourceFile(sourceFilePath, workspaceRoot);
 
-        // ── Phase 1: Environment Readiness ──
-        await this.ensureEnvironment(workspaceRoot, stream, config);
-
-        // ── Phase 2: Collect Full Context ──
-        stream.progress('Analyzing source file and dependencies...');
-        const sourceContext = await this.contextCollector.collectContext(sourceFilePath, workspaceRoot);
-        const dependencyContextStr = this.contextCollector.formatForPrompt(sourceContext);
-        
-        const sourceFileName = sourceContext.fileName;
-        const sourceCode = sourceContext.sourceCode;
-
-        this.logger.info('Context collected', {
-            sourceFile: sourceFileName,
-            dependencies: sourceContext.dependencies.size,
-            spfxPatterns: sourceContext.spfxPatterns.length
-        });
-
-        if (sourceContext.dependencies.size > 0) {
-            stream.markdown(`📦 Analyzed **${sourceContext.dependencies.size}** imported dependencies\n`);
+        // Verify Jest is available
+        const jestAvailable = await this.testRunner.isJestAvailable(workspaceRoot, config.jestCommand);
+        if (!jestAvailable) {
+            throw new JestNotFoundError(workspaceRoot);
         }
-        if (sourceContext.spfxPatterns.length > 0) {
-            stream.markdown(`🔍 Detected: ${sourceContext.spfxPatterns.slice(0, 3).join(', ')}\n\n`);
+
+        // Read the source file
+        const sourceCode = fs.readFileSync(sourceFilePath, 'utf-8');
+        const sourceFileName = path.basename(sourceFilePath);
+        
+        this.logger.info('Starting test generation', {
+            sourceFile: sourceFileName,
+            workspace: workspaceRoot
+        });
+        stream.progress('Collecting source context...');
+
+        // Collect dependency context for more accurate test generation
+        let dependencyContext: string | undefined;
+        try {
+            const fullContext = await this.contextCollector.collectContext(sourceFilePath, workspaceRoot);
+            dependencyContext = this.contextCollector.formatForPrompt(fullContext);
+            if (dependencyContext) {
+                this.logger.info('Dependency context collected', {
+                    dependencies: fullContext.dependencies.size,
+                    frameworkPatterns: fullContext.frameworkPatterns.length
+                });
+            }
+        } catch (error) {
+            this.logger.warn('Failed to collect dependency context, proceeding without it', error);
+        }
+
+        // Discover project stack (cached per workspace) for dynamic prompts
+        let systemPrompt: string | undefined;
+        try {
+            if (!this.detectedStack) {
+                stream.progress('Discovering project stack...');
+                this.detectedStack = await this.stackDiscovery.discover(workspaceRoot);
+                this.logger.info('Stack discovered', {
+                    framework: this.detectedStack.framework,
+                    language: this.detectedStack.language,
+                    testRunner: this.detectedStack.testRunner,
+                    confidence: this.detectedStack.confidence
+                });
+                const summary = this.stackDiscovery.formatStackSummary(this.detectedStack);
+                stream.markdown(`📦 **Detected stack:** ${summary}\n\n`);
+            }
+            systemPrompt = PROMPTS.buildSystemPrompt(this.detectedStack);
+        } catch (error) {
+            this.logger.warn('Stack discovery failed, using default prompts', error);
         }
 
         // Determine test file path
         const testFilePath = this.getTestFilePath(sourceFilePath, config.testFilePattern);
+        
+        this.logger.info(`Test file will be created at: ${testFilePath}`);
+        
+        // 🧠 LLM-FIRST: Plan test strategy before generating
+        let testStrategy: TestStrategy | undefined;
+        try {
+            stream.progress('Analyzing source code and planning test strategy...');
+            const projectAnalysis = await this.buildProjectAnalysis(workspaceRoot);
+            
+            testStrategy = await this.llmProvider.planTestStrategy({
+                sourceCode,
+                fileName: sourceFileName,
+                projectAnalysis,
+                existingTestPatterns: await this.findExistingTestPatterns(workspaceRoot)
+            });
+            
+            // Show strategy to user
+            stream.markdown(`\n🧠 **Test Strategy Planned by LLM:**\n\n`);
+            stream.markdown(`- **Approach:** ${testStrategy.approach}\n`);
+            stream.markdown(`- **Mocking:** ${testStrategy.mockingStrategy}\n`);
+            if (testStrategy.mocksNeeded.length > 0) {
+                stream.markdown(`- **Mocks needed:** ${testStrategy.mocksNeeded.slice(0, 3).join(', ')}${testStrategy.mocksNeeded.length > 3 ? '...' : ''}\n`);
+            }
+            if (testStrategy.potentialIssues.length > 0) {
+                stream.markdown(`- **Potential issues:** ${testStrategy.potentialIssues[0]}\n`);
+            }
+            stream.markdown(`- **Est. iterations:** ${testStrategy.estimatedIterations}\n\n`);
+            
+            this.logger.info('Test strategy planned', {
+                approach: testStrategy.approach,
+                mockingStrategy: testStrategy.mockingStrategy,
+                mocksCount: testStrategy.mocksNeeded.length
+            });
+        } catch (error) {
+            this.logger.warn('Failed to plan test strategy, proceeding without it', error);
+            stream.markdown(`⚠️ Could not plan strategy (LLM error), proceeding with default approach\n\n`);
+        }
+        
+        stream.progress('Generating initial test...');
 
-        // ── Phase 3: Generate Initial Test ──
-        stream.progress('Generating test with full project context...');
-
+        // Attempt 1: Generate initial test
         let result = await this.llmProvider.generateTest({
             sourceCode,
             fileName: sourceFileName,
-            dependencyContext: dependencyContextStr,
+            dependencyContext,
+            systemPrompt,
             attempt: 1,
-            maxAttempts
+            maxAttempts: config.maxHealingAttempts
         });
 
-        let currentTestCode = this.extractPureCode(result.code);
-        fs.writeFileSync(testFilePath, currentTestCode, 'utf-8');
+        fs.writeFileSync(testFilePath, result.code, 'utf-8');
+        this.logger.info('Initial test file generated', { model: result.model, mode });
 
         stream.markdown(`✅ Generated test file: \`${path.relative(workspaceRoot, testFilePath)}\`\n\n`);
         
-        // FAST mode: Skip execution
+        // FAST mode: Skip test execution
         if (!shouldExecuteTests) {
             stream.markdown(`⚡ **Modo FAST**: Test generado sin ejecutar\n\n`);
+            stream.markdown(`💡 Revisa el test manualmente o ejecútalo con: \`npm test ${path.basename(testFilePath)}\`\n`);
+            
             const duration = Date.now() - startTime;
             this.telemetryService.trackTestGeneration(true, 1, duration);
+            
             return testFilePath;
         }
-
-        // ── Phase 4: Execute & Self-Heal Loop ──
+        
         stream.progress('Running test...');
+
+        // Run the test
         let testResult = await this.testRunner.runTest(testFilePath, workspaceRoot, config.jestCommand);
 
-        let attempt = 0; // healing attempts counter
+        // Self-healing loop
+        let attempt = 1;
         let rateLimitRetries = 0;
         
-        while (!testResult.success && attempt < maxAttempts) {
+        while (!testResult.success && attempt < effectiveMaxAttempts) {
             attempt++;
             
-            const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
-            errorPatterns.push(cleanedError.substring(0, 200));
-            const summary = JestLogParser.extractTestSummary(testResult.output);
-
-            this.telemetryService.trackHealingAttempt(attempt, 'JestTestFailure');
-
-            // ── Phase 4a: Detect infrastructure issues ──
-            const envHints = this.detectEnvironmentIssues(testResult.output);
+            stream.markdown(`⚠️ Test failed on attempt ${attempt - 1}. Analyzing errors...\n\n`);
             
-            if (envHints.autoFixable) {
-                stream.markdown(`🔧 **Infrastructure issue detected:** ${envHints.description}\n`);
-                stream.progress(`Auto-fixing: ${envHints.description}...`);
-                
-                const fixed = await this.autoFixEnvironment(envHints, workspaceRoot, stream);
-                if (fixed) {
-                    stream.markdown(`✅ Fixed: ${envHints.description}\n\n`);
-                    attempt--; // Don't count infra fix as healing attempt
-                    stream.progress('Re-running test after environment fix...');
-                    testResult = await this.testRunner.runTest(testFilePath, workspaceRoot, config.jestCommand);
-                    continue;
-                }
-            }
+            // Parse and clean the error output
+            const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
+            
+            // CRITICAL: If cleaned error is empty/short, use raw output
+            const errorToSend = (cleanedError && cleanedError.length > 50) 
+                ? cleanedError 
+                : testResult.output.substring(0, 3000); // Use raw output if cleaning failed
+            
+            this.logger.info(`Test failed (attempt ${attempt}), error length: ${testResult.output.length} chars, cleaned: ${cleanedError.length} chars`);
+            
+            errorPatterns.push(errorToSend.substring(0, 200)); // Store first 200 chars
+            const summary = JestLogParser.extractTestSummary(testResult.output);
+            
+            this.telemetryService.trackHealingAttempt(attempt, 'JestTestFailure');
+            
+            stream.markdown(`**Error Summary:** ${summary.failed} failed, ${summary.passed} passed\n\n`);
+            stream.progress(`Healing test (attempt ${attempt}/${effectiveMaxAttempts})...`);
 
-            // ── Phase 4b: LLM-based healing ──
-            stream.markdown(`⚠️ Test failed (healing attempt ${attempt}/${maxAttempts})\n`);
-            if (summary.failed > 0 || summary.total > 0) {
-                stream.markdown(`📊 ${summary.failed} failed, ${summary.passed} passed of ${summary.total} total\n`);
-            }
-            stream.progress(`Healing test (attempt ${attempt}/${maxAttempts})...`);
-
+            // Wait briefly to avoid rate limits (exponential backoff)
             await this.sleep(config.initialBackoffMs * attempt);
 
             try {
-                // Read current test from disk
-                currentTestCode = fs.readFileSync(testFilePath, 'utf-8');
+                // Read the current failing test code to send to LLM
+                const currentTestCode = fs.existsSync(testFilePath) 
+                    ? fs.readFileSync(testFilePath, 'utf-8') 
+                    : '';
 
-                // Send EVERYTHING to the LLM: source + deps + current test + error
+                // Ask LLM to fix the test - use errorToSend which has fallback to raw output
                 result = await this.llmProvider.fixTest({
                     sourceCode,
                     fileName: sourceFileName,
-                    dependencyContext: dependencyContextStr,
-                    errorContext: cleanedError,
                     currentTestCode,
-                    environmentHints: envHints.hints.length > 0 
-                        ? `\n**Environment hints:**\n${envHints.hints.join('\n')}\n`
-                        : '',
+                    errorContext: errorToSend, // Use the error with fallback logic
+                    dependencyContext,
+                    systemPrompt,
                     attempt,
-                    maxAttempts
+                    maxAttempts: config.maxHealingAttempts
                 });
 
-                currentTestCode = this.extractPureCode(result.code);
-                fs.writeFileSync(testFilePath, currentTestCode, 'utf-8');
+                fs.writeFileSync(testFilePath, result.code, 'utf-8');
+                this.logger.info(`Test file updated (attempt ${attempt})`, { model: result.model });
 
-                stream.markdown(`🔄 Test updated (attempt ${attempt})\n\n`);
-                stream.progress('Running healed test...');
+                stream.markdown(`🔄 Updated test file (attempt ${attempt})\n\n`);
+                stream.progress('Running test again...');
 
+                // Run the test again
                 testResult = await this.testRunner.runTest(testFilePath, workspaceRoot, config.jestCommand);
-                rateLimitRetries = 0;
+                rateLimitRetries = 0; // Reset rate limit counter on success
             } catch (error) {
                 if (error instanceof RateLimitError) {
                     rateLimitRetries++;
                     if (rateLimitRetries >= config.maxRateLimitRetries) {
+                        this.logger.error('Max rate limit retries exceeded');
                         throw error;
                     }
-                    stream.markdown(`⏸️ Rate limit (retry ${rateLimitRetries}/${config.maxRateLimitRetries}). Waiting...\n\n`);
-                    await this.sleep(5000 * rateLimitRetries);
-                    attempt--;
+                    stream.markdown(`⏸️ Rate limit encountered (retry ${rateLimitRetries}/${config.maxRateLimitRetries}). Waiting...\n\n`);
+                    await this.sleep(5000 * rateLimitRetries); // Exponential backoff for rate limits
+                    attempt--; // Don't count this as a real attempt
                     continue;
                 }
                 this.logger.error('Error during test healing', error);
@@ -233,291 +311,64 @@ export class TestAgent {
             }
         }
 
-        // ── Phase 5: Save Results ──
+        // Save to history
         if (this.stateService) {
             const history: TestGenerationHistory = {
                 sourceFile: sourceFilePath,
                 testFile: testFilePath,
                 timestamp: new Date(),
-                attempts: attempt + 1,
+                attempts: attempt,
                 success: testResult.success,
                 errorPatterns,
                 model: result.model || 'unknown'
             };
             await this.stateService.addTestGeneration(history);
+            this.logger.debug('Test generation saved to history');
         }
 
+        // Final results
         const duration = Date.now() - startTime;
-        this.telemetryService.trackTestGeneration(testResult.success, attempt + 1, duration);
+        
+        this.telemetryService.trackTestGeneration(
+            testResult.success, 
+            attempt, 
+            duration
+        );
         
         if (testResult.success) {
-            stream.markdown(`✅ **Test passed!** (${(duration / 1000).toFixed(1)}s, ${attempt + 1} attempt(s))\n\n`);
+            stream.markdown(`✅ **Test passed successfully!** (${(duration / 1000).toFixed(1)}s)\n\n`);
             const summary = JestLogParser.extractTestSummary(testResult.output);
-            stream.markdown(`📊 ${summary.passed} passed, ${summary.total} total\n\n`);
+            stream.markdown(`**Final Results:** ${summary.passed} passed, ${summary.total} total\n\n`);
+            this.logger.info('Test generation succeeded', { attempts: attempt, duration });
         } else {
-            stream.markdown(`❌ **Test still failing after ${maxAttempts} healing attempts.** (${(duration / 1000).toFixed(1)}s)\n\n`);
+            stream.markdown(`❌ **Test still failing after ${config.maxHealingAttempts} attempts.** (${(duration / 1000).toFixed(1)}s)\n\n`);
             stream.markdown('Consider reviewing the generated test manually.\n\n');
+            
+            // Show error to user - with fallback to raw output
             const cleanedError = JestLogParser.cleanJestOutput(testResult.output);
-            stream.markdown('```\n' + cleanedError + '\n```\n\n');
+            const errorToShow = (cleanedError && cleanedError.length > 20)
+                ? cleanedError
+                : testResult.output.substring(0, 2000); // Show raw output if cleaning failed
+            
+            stream.markdown('```\n' + errorToShow + '\n```\n\n');
+            this.logger.warn('Test generation failed', { 
+                attempts: attempt, 
+                duration,
+                outputLength: testResult.output.length,
+                cleanedLength: cleanedError.length
+            });
             
             this.telemetryService.trackError('TestGenerationError', 'generation');
+            
             throw new TestGenerationError(
                 'Test still failing after maximum attempts',
-                attempt + 1,
-                maxAttempts,
+                attempt,
+                config.maxHealingAttempts,
                 testResult.output
             );
         }
 
         return testFilePath;
-    }
-
-    /**
-     * Ensure environment is ready: Jest, ts-jest, jsdom compatibility
-     * Now uses AI-powered error analysis when installations fail
-     */
-    private async ensureEnvironment(
-        workspaceRoot: string, 
-        stream: vscode.ChatResponseStream,
-        config: ReturnType<typeof ConfigService.getConfig>
-    ): Promise<void> {
-        const jestAvailable = await this.testRunner.isJestAvailable(workspaceRoot, config.jestCommand);
-        if (!jestAvailable) {
-            throw new JestNotFoundError(workspaceRoot);
-        }
-
-        if (!this.configService.isTsJestInstalled(workspaceRoot)) {
-            stream.markdown(`📦 Installing ts-jest...\n`);
-            
-            // First attempt: use heuristic versions
-            const existingJest = this.dependencyService.getExistingJestVersion(workspaceRoot);
-            const tsJestVersion = (existingJest && existingJest.major === 28) ? '^28.0.8' : '^29.1.1';
-            const typesJestVersion = (existingJest && existingJest.major === 28) ? '^28.1.0' : '^29.5.11';
-
-            let result = await this.packageService.installPackages(workspaceRoot, [
-                `ts-jest@${tsJestVersion}`,
-                `@types/jest@${typesJestVersion}`,
-                'identity-obj-proxy@^3.0.0'
-            ]);
-            
-            // If failed, use AI to analyze and fix
-            if (!result.success && result.error) {
-                stream.markdown(`⚠️ Installation failed. Analyzing error with AI...\n`);
-                const fixed = await this.intelligentDependencyFix(
-                    result.error,
-                    workspaceRoot,
-                    stream,
-                    'dependency'
-                );
-                if (!fixed) {
-                    throw new TestGenerationError('ts-jest installation failed after AI analysis', 0, 0, result.error);
-                }
-            }
-            stream.markdown(`✅ Dependencies installed\n\n`);
-        }
-
-        const configCreated = await this.configService.ensureValidJestConfig(workspaceRoot);
-        if (configCreated) {
-            stream.markdown(`🔧 Updated jest.config.js with ts-jest\n\n`);
-        }
-
-        const jestSetupPath = path.join(workspaceRoot, 'jest.setup.js');
-        if (!fs.existsSync(jestSetupPath)) {
-            await this.configService.createJestSetup(workspaceRoot);
-        }
-        await this.configService.createMockDirectory(workspaceRoot);
-        await this.configService.updatePackageJsonScripts(workspaceRoot);
-
-        // Check jsdom compatibility
-        await this.ensureJsdomCompatibility(workspaceRoot, stream);
-    }
-
-    /**
-     * Use AI to analyze a dependency/execution error and apply the fix
-     * Returns true if the issue was resolved
-     */
-    private async intelligentDependencyFix(
-        error: string,
-        workspaceRoot: string,
-        stream: vscode.ChatResponseStream,
-        errorType: 'dependency' | 'compilation' | 'execution',
-        maxRetries = 2
-    ): Promise<boolean> {
-        const packageJsonPath = path.join(workspaceRoot, 'package.json');
-        if (!fs.existsSync(packageJsonPath)) {
-            return false;
-        }
-
-        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-        
-        // Get Node version
-        let nodeVersion: string | undefined;
-        try {
-            const { spawn } = await import('child_process');
-            const proc = spawn('node', ['--version'], { cwd: workspaceRoot, shell: true });
-            nodeVersion = await new Promise<string>((resolve) => {
-                let output = '';
-                proc.stdout?.on('data', (data) => { output += data.toString(); });
-                proc.on('close', () => resolve(output.trim()));
-            });
-        } catch { /* ignore */ }
-
-        // Get Jest config
-        let jestConfig: string | undefined;
-        const jestConfigPath = path.join(workspaceRoot, 'jest.config.js');
-        if (fs.existsSync(jestConfigPath)) {
-            jestConfig = fs.readFileSync(jestConfigPath, 'utf-8');
-        }
-
-        let attempt = 0;
-        while (attempt < maxRetries) {
-            attempt++;
-            stream.progress(`🧠 Consulting AI for solution (attempt ${attempt}/${maxRetries})...`);
-
-            try {
-                const solution = await this.llmProvider.analyzeAndFixError(error, {
-                    packageJson,
-                    nodeVersion,
-                    jestConfig,
-                    errorType
-                });
-
-                stream.markdown(`💡 **AI Diagnosis:** ${solution.diagnosis}\n`);
-
-                // Apply package installations
-                if (solution.packages && solution.packages.length > 0) {
-                    stream.markdown(`📦 Installing: ${solution.packages.join(', ')}\n`);
-                    const result = await this.packageService.installPackages(workspaceRoot, solution.packages);
-                    
-                    if (!result.success && result.error) {
-                        error = result.error; // Update error for next retry
-                        stream.markdown(`⚠️ Installation failed, retrying with updated context...\n`);
-                        continue;
-                    }
-                }
-
-                // Execute additional commands if needed
-                if (solution.commands && solution.commands.length > 0) {
-                    for (const cmd of solution.commands) {
-                        stream.markdown(`⚙️ Running: \`${cmd}\`\n`);
-                        // Execute command (simplified - you may want more robust execution)
-                        const { spawn } = await import('child_process');
-                        await new Promise<void>((resolve) => {
-                            const proc = spawn(cmd, [], { cwd: workspaceRoot, shell: true });
-                            proc.on('close', () => resolve());
-                        });
-                    }
-                }
-
-                stream.markdown(`✅ Applied AI-suggested fix\n\n`);
-                return true;
-            } catch (err) {
-                this.logger.error(`AI fix attempt ${attempt} failed`, err);
-                if (attempt === maxRetries) {
-                    return false;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * Ensure jest-environment-jsdom is compatible with the installed Jest version
-     */
-    private async ensureJsdomCompatibility(
-        workspaceRoot: string, 
-        stream: vscode.ChatResponseStream
-    ): Promise<void> {
-        const jestVersion = this.dependencyService.getExistingJestVersion(workspaceRoot);
-        if (!jestVersion) return;
-
-        const jsdomEnvPath = path.join(workspaceRoot, 'node_modules', 'jest-environment-jsdom');
-        if (!fs.existsSync(jsdomEnvPath)) {
-            const version = jestVersion.major >= 29 ? '^29.0.0' : `^${jestVersion.major}.0.0`;
-            const result = await this.packageService.installPackages(workspaceRoot, [
-                `jest-environment-jsdom@${version}`
-            ]);
-            if (result.success) {
-                stream.markdown(`📦 Installed jest-environment-jsdom@${version}\n`);
-            }
-            return;
-        }
-
-        try {
-            const jsdomPkgPath = path.join(jsdomEnvPath, 'package.json');
-            if (fs.existsSync(jsdomPkgPath)) {
-                const jsdomPkg = JSON.parse(fs.readFileSync(jsdomPkgPath, 'utf-8'));
-                const jsdomMajor = parseInt(jsdomPkg.version?.split('.')[0] || '0', 10);
-                
-                if (jsdomMajor !== jestVersion.major) {
-                    const targetVersion = `^${jestVersion.major}.0.0`;
-                    stream.markdown(`⚠️ Fixing jsdom version mismatch...\n`);
-                    await this.packageService.installPackages(workspaceRoot, [
-                        `jest-environment-jsdom@${targetVersion}`
-                    ]);
-                    stream.markdown(`✅ jest-environment-jsdom updated\n\n`);
-                }
-            }
-        } catch (error) {
-            this.logger.warn('Failed to check jsdom compatibility', error);
-        }
-    }
-
-    /**
-     * Detect environment/infrastructure issues from Jest output
-     */
-    private detectEnvironmentIssues(output: string): {
-        autoFixable: boolean;
-        description: string;
-        fixType?: 'jsdom' | 'module' | 'config';
-        hints: string[];
-    } {
-        const hints: string[] = [];
-        
-        if (output.includes('getVmContext')) {
-            return {
-                autoFixable: true,
-                description: 'jest-environment-jsdom version incompatible',
-                fixType: 'jsdom',
-                hints: ['Install compatible jest-environment-jsdom version']
-            };
-        }
-
-        const cannotFindModule = output.match(/Cannot find module '([^']+)'/g);
-        if (cannotFindModule) {
-            for (const match of cannotFindModule) {
-                const moduleName = match.match(/Cannot find module '([^']+)'/)?.[1];
-                if (moduleName && !moduleName.startsWith('.') && !moduleName.startsWith('/')) {
-                    hints.push(`Module '${moduleName}' may not be installed`);
-                }
-            }
-        }
-
-        if (output.includes('SyntaxError') && output.includes('Cannot use import statement outside a module')) {
-            hints.push('An imported module uses ESM syntax — may need transformIgnorePatterns update');
-        }
-
-        return { autoFixable: false, description: '', hints };
-    }
-
-    /**
-     * Attempt to auto-fix an infrastructure issue
-     */
-    private async autoFixEnvironment(
-        issue: { fixType?: string },
-        workspaceRoot: string,
-        _stream: vscode.ChatResponseStream
-    ): Promise<boolean> {
-        if (issue.fixType === 'jsdom') {
-            const jestVersion = this.dependencyService.getExistingJestVersion(workspaceRoot);
-            const targetVersion = jestVersion ? `^${jestVersion.major}.0.0` : '^29.0.0';
-            const result = await this.packageService.installPackages(workspaceRoot, [
-                `jest-environment-jsdom@${targetVersion}`
-            ]);
-            return result.success;
-        }
-        return false;
     }
 
     /**
@@ -548,34 +399,33 @@ export class TestAgent {
 
     /**
      * Determines the test file path based on source file path
+     * Supports customizable patterns via configuration
      */
     private getTestFilePath(sourceFilePath: string, pattern: string): string {
         const dir = path.dirname(sourceFilePath);
         const ext = path.extname(sourceFilePath);
         const baseName = path.basename(sourceFilePath, ext);
         
+        // Parse pattern: ${fileName}.test.${ext}
+        // Default pattern creates MyComponent.test.tsx from MyComponent.tsx
         let testFileName = pattern
             .replace('${fileName}', baseName)
-            .replace('${ext}', ext.substring(1));
+            .replace('${ext}', ext.substring(1)); // Remove the dot
         
+        // Ensure proper extension
         const hasTestExtension = testFileName.match(/\.test\.(ts|tsx)$|\.spec\.(ts|tsx)$/);
         if (!hasTestExtension) {
             testFileName += ext;
         }
         
-        return path.join(dir, testFileName);
-    }
-
-    /**
-     * Extract pure code from LLM response (remove markdown fences)
-     */
-    private extractPureCode(code: string): string {
-        const codeBlockRegex = /```(?:typescript|tsx|ts|javascript|js)?\s*([\s\S]*?)\s*```/;
-        const match = code.match(codeBlockRegex);
-        if (match) {
-            return match[1].trim();
-        }
-        return code.trim();
+        const testFilePath = path.join(dir, testFileName);
+        this.logger.debug('Test file path determined', { 
+            sourceFile: sourceFilePath, 
+            testFile: testFilePath,
+            pattern
+        });
+        
+        return testFilePath;
     }
 
     /**
@@ -583,5 +433,130 @@ export class TestAgent {
      */
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Build project analysis for LLM planning
+     */
+    private async buildProjectAnalysis(projectRoot: string): Promise<ProjectAnalysis> {
+        const packageJsonPath = path.join(projectRoot, 'package.json');
+        const tsConfigPath = path.join(projectRoot, 'tsconfig.json');
+        
+        let packageJson: any = {};
+        let tsConfig: any = undefined;
+        let existingJestConfig: string | undefined;
+        
+        // Read package.json
+        if (fs.existsSync(packageJsonPath)) {
+            packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+        }
+        
+        // Read tsconfig.json
+        if (fs.existsSync(tsConfigPath)) {
+            tsConfig = JSON.parse(fs.readFileSync(tsConfigPath, 'utf-8'));
+        }
+        
+        // Read existing jest config if present
+        const configFiles = ['jest.config.js', 'jest.config.ts', 'jest.config.json'];
+        for (const file of configFiles) {
+            const configPath = path.join(projectRoot, file);
+            if (fs.existsSync(configPath)) {
+                existingJestConfig = fs.readFileSync(configPath, 'utf-8');
+                break;
+            }
+        }
+        
+        // Find existing test files
+        const existingTests: string[] = [];
+        const srcDir = path.join(projectRoot, 'src');
+        if (fs.existsSync(srcDir)) {
+            this.findTestFiles(srcDir, existingTests);
+        }
+        
+        return {
+            packageJson,
+            tsConfig,
+            existingJestConfig,
+            existingTests: existingTests.map(f => path.basename(f)),
+            dependencies: packageJson.dependencies || {},
+            devDependencies: packageJson.devDependencies || {},
+            framework: this.detectFramework(packageJson),
+            reactVersion: packageJson.dependencies?.react || packageJson.devDependencies?.react,
+            nodeVersion: packageJson.engines?.node
+        };
+    }
+
+    private findTestFiles(dir: string, results: string[]): void {
+        if (results.length >= 10) return; // Limit to 10 examples
+        
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (results.length >= 10) break;
+                
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory() && entry.name !== 'node_modules') {
+                    this.findTestFiles(fullPath, results);
+                } else if (entry.name.match(/\.(test|spec)\.(ts|tsx|js|jsx)$/)) {
+                    results.push(fullPath);
+                }
+            }
+        } catch (error) {
+            // Ignore read errors
+        }
+    }
+
+    private detectFramework(packageJson: any): string {
+        const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+        
+        if (deps['@microsoft/sp-core-library']) return 'spfx';
+        if (deps['@angular/core']) return 'angular';
+        if (deps['next']) return 'next';
+        if (deps['react']) return 'react';
+        if (deps['vue']) return 'vue';
+        if (deps['@types/vscode']) return 'vscode-extension';
+        
+        return 'unknown';
+    }
+
+    private async findExistingTestPatterns(projectRoot: string): Promise<string[]> {
+        const patterns: string[] = [];
+        const srcDir = path.join(projectRoot, 'src');
+        
+        if (!fs.existsSync(srcDir)) {
+            return patterns;
+        }
+        
+        const testFiles: string[] = [];
+        this.findTestFiles(srcDir, testFiles);
+        
+        // Extract patterns from first 3 test files
+        for (const testFile of testFiles.slice(0, 3)) {
+            try {
+                const content = fs.readFileSync(testFile, 'utf-8');
+                // Extract key patterns: describe blocks, it blocks, common setup
+                const describeBlocks = content.match(/describe\(['"](.*?)['"]/g);
+                const itBlocks = content.match(/it\(['"](.*?)['"]/g);
+                
+                if (describeBlocks && describeBlocks.length > 0) {
+                    patterns.push(describeBlocks[0]);
+                }
+                if (itBlocks && itBlocks.length > 0) {
+                    patterns.push(itBlocks[0]);
+                }
+                
+                // Check for common setup patterns
+                if (content.includes('beforeEach')) {
+                    patterns.push('Uses beforeEach setup');
+                }
+                if (content.includes('jest.mock')) {
+                    patterns.push('Uses jest.mock for dependencies');
+                }
+            } catch (error) {
+                // Ignore read errors
+            }
+        }
+        
+        return patterns.slice(0, 5); // Return max 5 patterns
     }
 }

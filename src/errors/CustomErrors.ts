@@ -3,7 +3,7 @@
  */
 
 /**
- * Base error class for all SPFX Test Agent errors
+ * Base error class for all Test Agent errors
  */
 export class SPFXTestAgentError extends Error {
     constructor(message: string, public readonly code: string) {

@@ -7,7 +7,8 @@ import * as fs from 'fs';
  */
 export class FileScanner {
     /**
-     * Find all TypeScript/TSX files in the workspace (excluding test files)
+     * Find all source files in the workspace (excluding test files)
+     * Supports TypeScript (.ts/.tsx) and JavaScript (.js/.jsx)
      * 
      * @param base - Workspace folder or URI to scan
      * @param exclude - Additional patterns to exclude
@@ -26,18 +27,22 @@ export class FileScanner {
             '**/build/**',
             '**/*.test.ts',
             '**/*.test.tsx',
+            '**/*.test.js',
+            '**/*.test.jsx',
             '**/*.spec.ts',
             '**/*.spec.tsx',
+            '**/*.spec.js',
+            '**/*.spec.jsx',
             '**/*.d.ts'
         ];
 
         const allExclusions = [...defaultExclusions, ...exclude];
 
-        // Search for .ts and .tsx files
+        // Search for .ts, .tsx, .js, .jsx files
         const tsFiles = await vscode.workspace.findFiles(
             new vscode.RelativePattern(base, '**/*.ts'),
             `{${allExclusions.join(',')}}`,
-            1000 // Max 1000 files
+            1000
         );
 
         const tsxFiles = await vscode.workspace.findFiles(
@@ -46,7 +51,19 @@ export class FileScanner {
             1000
         );
 
-        return [...tsFiles, ...tsxFiles];
+        const jsFiles = await vscode.workspace.findFiles(
+            new vscode.RelativePattern(base, '**/*.js'),
+            `{${allExclusions.join(',')}}`,
+            1000
+        );
+
+        const jsxFiles = await vscode.workspace.findFiles(
+            new vscode.RelativePattern(base, '**/*.jsx'),
+            `{${allExclusions.join(',')}}`,
+            1000
+        );
+
+        return [...tsFiles, ...tsxFiles, ...jsFiles, ...jsxFiles];
     }
 
     /**

@@ -41,7 +41,7 @@ function buildDefaultJestConfig(projectRoot?: string): Record<string, unknown> {
         ],
         transform: TS_JEST_TRANSFORM,
         transformIgnorePatterns: [
-            'node_modules/(?!(@microsoft|@pnp|@fluentui)/)'
+            'node_modules/'
         ],
         moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json']
     };
@@ -67,9 +67,6 @@ try {
 } catch (_e) {
   // @testing-library/jest-dom not installed — skipping
 }
-
-// Mock SharePoint framework context if needed
-global.spfxContext = {};
 `;
 
 /**
@@ -194,8 +191,7 @@ export class JestConfigurationService {
 
     /**
      * Update package.json to add test scripts.
-     * IMPORTANT: Overrides existing "test" script if it uses "gulp test"
-     * because SPFx default `gulp test` does NOT invoke Jest directly.
+     * Only adds scripts if missing or if the current "test" script is a placeholder.
      */
     async updatePackageJsonScripts(projectRoot: string): Promise<void> {
         const packageJsonPath = path.join(projectRoot, 'package.json');
@@ -206,9 +202,12 @@ export class JestConfigurationService {
             packageJson.scripts = {};
         }
 
-        // Override or add "test" — gulp test does NOT work with our config
+        // Override or add "test" if it's missing or a placeholder
         const currentTest = packageJson.scripts.test || '';
-        if (!currentTest || currentTest.includes('gulp') || currentTest === 'echo \"Error: no test specified\" && exit 1') {
+        const placeholderPatterns = ['echo "Error: no test specified"', 'exit 1', 'gulp test'];
+        const isPlaceholder = !currentTest || placeholderPatterns.some(p => currentTest.includes(p));
+        
+        if (isPlaceholder) {
             packageJson.scripts.test = 'jest';
             this.logger.info(`Replaced test script "${currentTest}" with "jest"`);
         }
@@ -421,10 +420,31 @@ export class JestConfigurationService {
     private detectRequirements(analysis: ProjectAnalysis): string[] {
         const requirements: string[] = [];
         
-        if (analysis.framework === 'spfx') {
-            requirements.push('Support SharePoint Framework (SPFx) components');
-            requirements.push('Mock @microsoft/sp-* modules');
-            requirements.push('Handle Office UI Fabric / Fluent UI');
+        // Framework-specific requirements (detected dynamically)
+        switch (analysis.framework) {
+            case 'spfx':
+                requirements.push('Support SharePoint Framework (SPFx) components');
+                requirements.push('Mock @microsoft/sp-* modules');
+                requirements.push('Handle Office UI Fabric / Fluent UI');
+                break;
+            case 'angular':
+                requirements.push('Support Angular components with TestBed');
+                requirements.push('Configure zone.js for testing');
+                break;
+            case 'next':
+                requirements.push('Support Next.js with server/client components');
+                requirements.push('Mock next/router and next/navigation');
+                break;
+            case 'vue':
+                requirements.push('Support Vue components with @vue/test-utils');
+                break;
+            case 'react':
+                requirements.push('Support React components and JSX/TSX');
+                requirements.push('Configure jsdom test environment');
+                break;
+            case 'vscode-extension':
+                requirements.push('Support VS Code extension API mocking');
+                break;
         }
         
         if (analysis.reactVersion) {

@@ -5,6 +5,7 @@ import { Logger } from './Logger';
 import { ConfigService } from './ConfigService';
 import { LLMProviderFactory } from '../factories/LLMProviderFactory';
 import { ILLMProvider } from '../interfaces/ILLMProvider';
+import { StackDiscoveryService, ProjectStack } from './StackDiscoveryService';
 // ✨ v0.5.0: Removed hardcoded JEST_DEPENDENCIES imports - now using LLM-First approach
 
 
@@ -107,7 +108,13 @@ export class DependencyDetectionService {
     }
 
     /**
-     * Get compatible dependencies using LLM with retry loop + NPM VALIDATION
+     * Get compatible dependencies using stack analysis + LLM + NPM VALIDATION.
+     *
+     * Flow:
+     * 1. Run StackDiscoveryService (deterministic) to understand the project
+     * 2. Enrich the package.json sent to the LLM with stack context
+     * 3. Filter the LLM response to remove packages irrelevant to the detected stack
+     * 4. Validate remaining versions against npm registry
      */
     async getCompatibleDependencies(projectRoot: string): Promise<Record<string, string>> {
         const maxRetries = 3;
@@ -126,6 +133,43 @@ export class DependencyDetectionService {
             ...packageJson.devDependencies || {}
         };
 
+        // ── Step 0: Deterministic stack analysis ─────────────────────
+        const stackService = new StackDiscoveryService();
+        let stack: ProjectStack;
+        try {
+            stack = await stackService.discover(projectRoot);
+            this.logger.info('📊 Stack discovered', {
+                framework: stack.framework,
+                uiLibrary: stack.uiLibrary,
+                language: stack.language,
+                usesJsx: stack.usesJsx,
+                testRunner: stack.testRunner
+            });
+        } catch (err) {
+            this.logger.warn('Stack discovery failed, continuing with minimal info', err);
+            stack = {
+                framework: 'unknown', language: 'javascript', uiLibrary: 'none',
+                componentLibrary: 'none', testRunner: 'none', packageManager: 'npm',
+                moduleSystem: 'commonjs', keyDependencies: installedDeps,
+                mockPatterns: [], usesJsx: false, confidence: 'low'
+            };
+        }
+
+        // Inject stack summary into packageJson so the LLM receives it inside the prompt
+        const enrichedPackageJson = {
+            ...packageJson,
+            _stackAnalysis: {
+                framework: stack.framework,
+                uiLibrary: stack.uiLibrary,
+                language: stack.language,
+                usesJsx: stack.usesJsx,
+                testRunner: stack.testRunner,
+                hasReact: !!installedDeps['react'],
+                hasAngular: !!installedDeps['@angular/core'],
+                hasVue: !!installedDeps['vue'],
+            }
+        };
+
         this.logger.info('🧠 Using LLM to detect compatible dependencies...');
 
         while (attempt < maxRetries) {
@@ -133,9 +177,9 @@ export class DependencyDetectionService {
             this.logger.info(`Attempt ${attempt}/${maxRetries}...`);
 
             try {
-                // Step 1: LLM suggests versions
+                // Step 1: LLM suggests versions (with enriched context)
                 const llmVersions = await this.llmProvider.detectDependencies(
-                    packageJson,
+                    enrichedPackageJson,
                     lastError ? { error: lastError, attemptNumber: attempt - 1 } : undefined
                 );
 
@@ -145,10 +189,23 @@ export class DependencyDetectionService {
                         packages: Object.keys(llmVersions)
                     });
 
+                    // Step 1.5: DETERMINISTIC FILTER — remove irrelevant packages
+                    const filtered = this.filterByStack(llmVersions, stack, installedDeps);
+                    this.logger.info('🔎 After stack filter', {
+                        before: Object.keys(llmVersions).length,
+                        after: Object.keys(filtered).length,
+                        removed: Object.keys(llmVersions).filter(k => !(k in filtered))
+                    });
+
+                    if (Object.keys(filtered).length === 0) {
+                        this.logger.info('✅ All needed dependencies already installed (after filter)');
+                        return {};
+                    }
+
                     // Step 2: VALIDATE versions against npm registry
                     this.logger.info('🔍 Validating suggested versions against npm registry...');
                     const validationErrors: string[] = [];
-                    const validatedVersions = await this.validateVersionsWithNpm(llmVersions, validationErrors);
+                    const validatedVersions = await this.validateVersionsWithNpm(filtered, validationErrors);
 
                     if (validationErrors.length === 0) {
                         this.logger.info('✅ All versions validated successfully');
@@ -160,7 +217,7 @@ export class DependencyDetectionService {
                     this.logger.debug('Validation errors:', validationErrors);
 
                     const fixedVersions = await this.llmProvider.validateAndFixVersions({
-                        suggestedVersions: llmVersions,
+                        suggestedVersions: filtered,
                         validationErrors
                     });
 
@@ -173,7 +230,7 @@ export class DependencyDetectionService {
                         return finalVersions;
                     }
 
-                    // Still have errors after LLM fix - prepare error message for retry
+                    // Still have errors after LLM fix — prepare error message for retry
                     lastError = `Validation failed for packages: ${finalValidationErrors.join(', ')}`;
                     this.logger.warn(`❌ Still have validation errors after LLM fix`);
                     
@@ -206,15 +263,12 @@ export class DependencyDetectionService {
      * This avoids hardcoded versions that may not exist
      */
     private getLatestCompatibleVersions(installedDeps: Record<string, string>): Record<string, string> {
+        // Only truly universal test packages — framework/environment-specific deps
+        // are handled by the LLM based on actual project analysis
         const essentialPackages = [
             'jest',
             '@types/jest',
-            'ts-jest',
-            '@testing-library/react',
-            '@testing-library/jest-dom',
-            'react-test-renderer',
-            '@types/react-test-renderer',
-            'identity-obj-proxy'
+            'ts-jest'
         ];
 
         const missing: Record<string, string> = {};
@@ -328,5 +382,88 @@ export class DependencyDetectionService {
                 resolve(true);
             }, 5000);
         });
+    }
+
+    // ── Deterministic post-LLM filter ────────────────────────────
+
+    /**
+     * Remove packages from the LLM suggestion that are irrelevant to this project's stack.
+     * This is a hard guardrail — even if the LLM hallucinates, we won't install nonsense.
+     */
+    private filterByStack(
+        suggestedVersions: Record<string, string>,
+        stack: ProjectStack,
+        installedDeps: Record<string, string>
+    ): Record<string, string> {
+        const hasReact = !!installedDeps['react'];
+        const hasAngular = !!installedDeps['@angular/core'];
+        const hasVue = !!installedDeps['vue'];
+        const needsBrowser = hasReact || hasAngular || hasVue ||
+            stack.framework === 'spfx' || stack.framework === 'next' ||
+            stack.usesJsx;
+
+        // Packages that require React
+        const reactOnly = new Set([
+            '@testing-library/react',
+            'react-test-renderer',
+            '@types/react-test-renderer',
+        ]);
+
+        // Packages that only make sense for browser/DOM projects
+        const browserOnly = new Set([
+            'jest-environment-jsdom',
+            'identity-obj-proxy',
+            '@testing-library/jest-dom',
+        ]);
+
+        // Packages that require Angular
+        const angularOnly = new Set([
+            '@angular/compiler-cli',
+            'jest-preset-angular',
+        ]);
+
+        // Packages that require Vue
+        const vueOnly = new Set([
+            '@testing-library/vue',
+            '@vue/test-utils',
+        ]);
+
+        const filtered: Record<string, string> = {};
+
+        for (const [pkg, version] of Object.entries(suggestedVersions)) {
+            // Skip already-installed packages
+            if (installedDeps[pkg]) {
+                this.logger.debug(`Skipping ${pkg}: already installed (${installedDeps[pkg]})`);
+                continue;
+            }
+
+            // React-specific: remove if no React
+            if (reactOnly.has(pkg) && !hasReact) {
+                this.logger.info(`🚫 Filtered out ${pkg}: project has no React dependency`);
+                continue;
+            }
+
+            // Browser/DOM-specific: remove if no browser need
+            if (browserOnly.has(pkg) && !needsBrowser) {
+                this.logger.info(`🚫 Filtered out ${pkg}: project has no browser/DOM need`);
+                continue;
+            }
+
+            // Angular-specific
+            if (angularOnly.has(pkg) && !hasAngular) {
+                this.logger.info(`🚫 Filtered out ${pkg}: project has no Angular dependency`);
+                continue;
+            }
+
+            // Vue-specific
+            if (vueOnly.has(pkg) && !hasVue) {
+                this.logger.info(`🚫 Filtered out ${pkg}: project has no Vue dependency`);
+                continue;
+            }
+
+            filtered[pkg] = version;
+        }
+
+        return filtered;
     }
 }

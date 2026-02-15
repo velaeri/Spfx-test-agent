@@ -22,7 +22,7 @@ import {
 } from '../errors/CustomErrors';
 
 /**
- * TestAgent - Core agentic workflow for automated SPFx test generation
+ * TestAgent - Core agentic workflow for automated test generation
  * 
  * This agent implements a self-healing loop:
  * 1. Generates a test file using LLM (GPT-4 via Copilot or other providers)
@@ -137,7 +137,7 @@ export class TestAgent {
             if (dependencyContext) {
                 this.logger.info('Dependency context collected', {
                     dependencies: fullContext.dependencies.size,
-                    spfxPatterns: fullContext.spfxPatterns.length
+                    frameworkPatterns: fullContext.frameworkPatterns.length
                 });
             }
         } catch (error) {

@@ -19,37 +19,37 @@ export class QueueCommands {
      */
     public registerCommands(context: vscode.ExtensionContext): void {
         context.subscriptions.push(
-            vscode.commands.registerCommand('spfx-test-agent.pauseQueue', async () => {
+            vscode.commands.registerCommand('test-agent.pauseQueue', async () => {
                 await this.handlePauseCommand();
             })
         );
 
         context.subscriptions.push(
-            vscode.commands.registerCommand('spfx-test-agent.resumeQueue', async () => {
+            vscode.commands.registerCommand('test-agent.resumeQueue', async () => {
                 await this.handleResumeCommand();
             })
         );
 
         context.subscriptions.push(
-            vscode.commands.registerCommand('spfx-test-agent.skipCurrent', async () => {
+            vscode.commands.registerCommand('test-agent.skipCurrent', async () => {
                 await this.handleSkipCommand();
             })
         );
 
         context.subscriptions.push(
-            vscode.commands.registerCommand('spfx-test-agent.cancelQueue', async () => {
+            vscode.commands.registerCommand('test-agent.cancelQueue', async () => {
                 await this.handleCancelCommand();
             })
         );
 
         context.subscriptions.push(
-            vscode.commands.registerCommand('spfx-test-agent.retryFailed', async () => {
+            vscode.commands.registerCommand('test-agent.retryFailed', async () => {
                 await this.handleRetryFailedCommand();
             })
         );
 
         context.subscriptions.push(
-            vscode.commands.registerCommand('spfx-test-agent.showQueueStatus', async () => {
+            vscode.commands.registerCommand('test-agent.showQueueStatus', async () => {
                 await this.handleShowStatusCommand();
             })
         );
@@ -90,7 +90,7 @@ export class QueueCommands {
         );
         if (action === 'Continuar') {
             vscode.commands.executeCommand('workbench.action.chat.open', {
-                query: '@spfx-tester /continue'
+                query: '@test-agent /continue'
             });
         }
         this.logger.info('Queue resumed via command');
@@ -162,7 +162,7 @@ export class QueueCommands {
         if (confirm === 'Reintentar') {
             await this.queueService.retryFailed();
             vscode.window.showInformationMessage(
-                `🔄 Reintentando ${failedFiles.length} archivos. Usa "@spfx-tester /continue" para proceder.`
+                `🔄 Reintentando ${failedFiles.length} archivos. Usa "@test-agent /continue" para proceder.`
             );
             this.logger.info(`Retrying ${failedFiles.length} failed files`);
         }

@@ -1,8 +1,8 @@
 {
   "name": "spfx-test-agent",
-  "displayName": "SPFX Test Agent",
-  "description": "An agentic workflow extension that automates unit test creation for SharePoint Framework projects",
-  "version": "0.6.1",
+  "displayName": "Test Agent",
+  "description": "An agentic workflow extension that automates unit test creation for any JavaScript/TypeScript project",
+  "version": "0.6.11",
   "publisher": "velaeri",
   "repository": {
     "type": "git",
@@ -23,26 +23,26 @@
   "contributes": {
     "commands": [
       {
-        "command": "spfx-test-agent.setup",
+        "command": "test-agent.setup",
         "title": "Setup Jest Environment",
-        "category": "SPFX Test Agent"
+        "category": "Test Agent"
       },
       {
-        "command": "spfx-test-agent.checkSetup",
+        "command": "test-agent.checkSetup",
         "title": "Check Jest Environment Setup",
-        "category": "SPFX Test Agent"
+        "category": "Test Agent"
       },
       {
-        "command": "spfx-test-agent.installWithCommand",
+        "command": "test-agent.installWithCommand",
         "title": "Install with Suggested Command",
-        "category": "SPFX Test Agent"
+        "category": "Test Agent"
       }
     ],
     "chatParticipants": [
       {
-        "id": "spfx-tester",
-        "name": "spfx-tester",
-        "description": "Automated test generation agent for SharePoint Framework projects with self-healing capabilities",
+        "id": "test-agent",
+        "name": "test-agent",
+        "description": "Automated test generation agent for any JS/TS project with self-healing capabilities",
         "isSticky": true,
         "commands": [
           {
@@ -55,57 +55,57 @@
           },
           {
             "name": "generate",
-            "description": "Generate and heal unit tests for an SPFx component"
+            "description": "Generate and heal unit tests for a source file"
           },
           {
             "name": "generate-all",
-            "description": "Generate tests for all TypeScript/TSX files in the workspace"
+            "description": "Generate tests for all source files in the workspace"
           }
         ]
       }
     ],
     "configuration": {
-      "title": "SPFX Test Agent",
+      "title": "Test Agent",
       "properties": {
-        "spfx-tester.maxHealingAttempts": {
+        "test-agent.maxHealingAttempts": {
           "type": "number",
           "default": 3,
           "minimum": 1,
           "maximum": 10,
           "description": "Maximum number of attempts to heal a failing test"
         },
-        "spfx-tester.initialBackoffMs": {
+        "test-agent.initialBackoffMs": {
           "type": "number",
           "default": 1000,
           "minimum": 100,
           "maximum": 10000,
           "description": "Initial backoff time in milliseconds between retry attempts"
         },
-        "spfx-tester.maxRateLimitRetries": {
+        "test-agent.maxRateLimitRetries": {
           "type": "number",
           "default": 5,
           "minimum": 1,
           "maximum": 10,
           "description": "Maximum number of retries when rate limit is hit"
         },
-        "spfx-tester.maxTokensPerError": {
+        "test-agent.maxTokensPerError": {
           "type": "number",
           "default": 1500,
           "minimum": 500,
           "maximum": 5000,
           "description": "Maximum number of characters to send from error output to LLM"
         },
-        "spfx-tester.testFilePattern": {
+        "test-agent.testFilePattern": {
           "type": "string",
           "default": "${fileName}.test.${ext}",
           "description": "Pattern for generated test file names. Use ${fileName} and ${ext} as placeholders"
         },
-        "spfx-tester.jestCommand": {
+        "test-agent.jestCommand": {
           "type": "string",
           "default": "npx jest",
           "description": "Command to execute Jest (e.g., 'npx jest', 'yarn jest', 'pnpm jest')"
         },
-        "spfx-tester.llmProvider": {
+        "test-agent.llmProvider": {
           "type": "string",
           "enum": [
             "copilot",
@@ -114,37 +114,37 @@
           "default": "copilot",
           "description": "LLM provider to use for code generation"
         },
-        "spfx-tester.azureOpenAI.endpoint": {
+        "test-agent.azureOpenAI.endpoint": {
           "type": "string",
           "default": "",
           "description": "Azure OpenAI Endpoint URL"
         },
-        "spfx-tester.azureOpenAI.apiKey": {
+        "test-agent.azureOpenAI.apiKey": {
           "type": "string",
           "default": "",
           "description": "Azure OpenAI API Key"
         },
-        "spfx-tester.azureOpenAI.deploymentName": {
+        "test-agent.azureOpenAI.deploymentName": {
           "type": "string",
           "default": "",
           "description": "Azure OpenAI Deployment Name"
         },
-        "spfx-tester.llmVendor": {
+        "test-agent.llmVendor": {
           "type": "string",
           "default": "copilot",
           "description": "LLM vendor identifier (for vscode.lm.selectChatModels)"
         },
-        "spfx-tester.llmFamily": {
+        "test-agent.llmFamily": {
           "type": "string",
           "default": "",
           "description": "LLM model family (e.g., 'gpt-4', 'gpt-3.5-turbo'). Leave empty to use user's currently selected model."
         },
-        "spfx-tester.enableTelemetry": {
+        "test-agent.enableTelemetry": {
           "type": "boolean",
           "default": false,
           "description": "Enable anonymous telemetry to help improve the extension"
         },
-        "spfx-tester.logLevel": {
+        "test-agent.logLevel": {
           "type": "string",
           "enum": [
             "debug",
@@ -177,12 +177,15 @@
     "test": "echo \"No tests specified\""
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^18.x",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "@vscode/vsce": "^3.7.1",
     "eslint": "^8.56.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
     "ts-loader": "^9.5.1",
     "typescript": "^5.3.3",
     "webpack": "^5.89.0",

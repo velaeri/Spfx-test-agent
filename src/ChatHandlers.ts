@@ -20,6 +20,7 @@ import {
     LLMNotAvailableError,
     SPFXTestAgentError
 } from './errors/CustomErrors';
+import { LLMOrchestrator } from './orchestrator/LLMOrchestrator';
 
 const logger = Logger.getInstance();
 const telemetryService = TelemetryService.getInstance();
@@ -82,7 +83,7 @@ export async function handleInstallRequest(
             if (attempt > 1) {
                 stream.markdown(`💡 Resuelto en el intento ${attempt} mediante auto-healing con IA.\n\n`);
             }
-            stream.markdown('Siguiente paso: Usa `@spfx-tester /generate-all` para generar tests.\n');
+            stream.markdown('Siguiente paso: Usa `@test-agent /generate-all` para generar tests.\n');
             return { metadata: { command: 'install', attempts: attempt } };
         }
 
@@ -402,8 +403,8 @@ export async function handleSetupRequest(
 
     if (projects.length === 0) {
         stream.markdown(`❌ **No se encontró ningún proyecto Node.js (package.json) en el workspace**\n\n`);
-        stream.markdown(`Por favor, abre la carpeta de tu proyecto SPFx.\n\n`);
-        stream.markdown(`💡 **Sugerencia:** \`File > Open Folder\` y selecciona tu proyecto SPFx.\n`);
+        stream.markdown(`Por favor, abre la carpeta de tu proyecto.\n\n`);
+        stream.markdown(`💡 **Sugerencia:** \`File > Open Folder\` y selecciona tu proyecto.\n`);
         return { errorDetails: { message: 'No package.json found' } };
     }
 
@@ -449,7 +450,7 @@ export async function handleSetupRequest(
         setupStatus.hasJestConfig && 
         setupStatus.hasJestSetup) {
         stream.markdown(`✅ **¡El entorno Jest ya está completamente configurado!**\n\n`);
-        stream.markdown(`Puedes usar \`@spfx-tester /generate\` para generar tests.\n`);
+        stream.markdown(`Puedes usar \`@test-agent /generate\` para generar tests.\n`);
         return { metadata: { command: 'setup' } };
     }
 
@@ -461,7 +462,7 @@ export async function handleSetupRequest(
 
     if (!setupResult.success) {
         stream.markdown(`\n❌ **Error al crear archivos de configuración**\n\n`);
-        stream.markdown(`Por favor, revisa el Output Channel "SPFX Test Agent" para más detalles.\n`);
+        stream.markdown(`Por favor, revisa el Output Channel "Test Agent" para más detalles.\n`);
         return { errorDetails: { message: 'Setup failed' } };
     }
 
@@ -476,7 +477,7 @@ export async function handleSetupRequest(
         stream.markdown(`\`\`\`bash\n${setupResult.installCommand}\n\`\`\`\n\n`);
         stream.button({
             command: 'vscode.chat.open',
-            arguments: [{ query: '@spfx-tester /install' }],
+            arguments: [{ query: '@test-agent /install' }],
             title: '▶️ Instalar con asistencia IA'
         });
         stream.markdown(`\n\n💡 **Nota:** Este comando usa \`--legacy-peer-deps\` para evitar conflictos de dependencias peer.\n\n`);
@@ -490,7 +491,7 @@ export async function handleSetupRequest(
     stream.markdown(`- \`jest.config.js\` - Configuración de Jest\n`);
     stream.markdown(`- \`jest.setup.js\` - Inicialización de testing-library\n`);
     stream.markdown(`- \`__mocks__/fileMock.js\` - Mock para archivos estáticos\n\n`);
-    stream.markdown(`**Siguiente paso:** Usa \`@spfx-tester /generate\` para generar tests automáticamente.\n`);
+    stream.markdown(`**Siguiente paso:** Usa \`@test-agent /generate\` para generar tests automáticamente.\n`);
 
     const setupDuration = Date.now() - setupStartTime;
     telemetryService.trackSetup(setupResult.success, setupDuration);
@@ -498,6 +499,346 @@ export async function handleSetupRequest(
     logger.info('Setup completed successfully via chat command');
 
     return { metadata: { command: 'setup' } };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AUTO-HEALING SYSTEM (LLM-First Jest Environment Validation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MAX_HEALING_ATTEMPTS = 10; // Increased from 3 - persistent healing
+
+/**
+ * Check if the project's Jest config uses jsdom test environment
+ */
+async function projectUsesJsdom(workspaceRoot: string): Promise<boolean> {
+    try {
+        // Check jest.config.js / jest.config.ts / jest.config.mjs
+        for (const configFile of ['jest.config.js', 'jest.config.ts', 'jest.config.mjs']) {
+            const configPath = path.join(workspaceRoot, configFile);
+            if (fs.existsSync(configPath)) {
+                const content = fs.readFileSync(configPath, 'utf-8');
+                if (content.includes('jsdom')) {
+                    return true;
+                }
+            }
+        }
+        // Check package.json jest config section
+        const packageJsonPath = path.join(workspaceRoot, 'package.json');
+        if (fs.existsSync(packageJsonPath)) {
+            const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+            if (pkg.jest?.testEnvironment === 'jsdom') {
+                return true;
+            }
+        }
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Get installed Jest-related packages with versions for LLM context
+ */
+async function getInstalledJestPackages(workspaceRoot: string): Promise<Record<string, string>> {
+    try {
+        const packageJsonPath = path.join(workspaceRoot, 'package.json');
+        if (!fs.existsSync(packageJsonPath)) {
+            return {};
+        }
+        
+        const content = fs.readFileSync(packageJsonPath, 'utf-8');
+        const pkg = JSON.parse(content);
+        const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+        
+        // Filter Jest-related packages
+        const jestPackages: Record<string, string> = {};
+        const jestKeywords = ['jest', '@testing-library', 'ts-jest', 'react-test-renderer'];
+        
+        for (const [name, version] of Object.entries(allDeps)) {
+            if (jestKeywords.some(keyword => name.includes(keyword))) {
+                jestPackages[name] = version as string;
+            }
+        }
+        
+        return jestPackages;
+    } catch (error) {
+        logger.warn('Failed to read installed Jest packages', error);
+        return {};
+    }
+}
+
+/**
+ * Pre-check: Detect common jsdom issues without calling LLM (fast path)
+ * Returns { hasIssue: boolean, diagnosis: string, fix: string }
+ */
+async function detectJsdomIssue(workspaceRoot: string): Promise<{
+    hasIssue: boolean;
+    diagnosis: string;
+    fix: string;
+}> {
+    try {
+        const jestPackages = await getInstalledJestPackages(workspaceRoot);
+        
+        // Check if jest-environment-jsdom is missing
+        if (!jestPackages['jest-environment-jsdom']) {
+            return {
+                hasIssue: true,
+                diagnosis: 'jest-environment-jsdom package is not installed. This is REQUIRED for Jest 27+ when using testEnvironment: "jsdom".',
+                fix: 'npm install --save-dev jest-environment-jsdom --legacy-peer-deps'
+            };
+        }
+        
+        // Check for version mismatch (Jest 29 with jsdom 25, etc.)
+        const jestVersion = jestPackages['jest'];
+        const jsdomVersion = jestPackages['jest-environment-jsdom'];
+        
+        if (jestVersion && jsdomVersion) {
+            const jestMajor = parseInt(jestVersion.replace(/[^\d]/g, '').charAt(0), 10);
+            const jsdomMajor = parseInt(jsdomVersion.replace(/[^\d]/g, '').charAt(0), 10);
+            
+            if (jestMajor !== jsdomMajor && jestMajor >= 27) {
+                return {
+                    hasIssue: true,
+                    diagnosis: `Version mismatch detected: Jest ${jestVersion} with jest-environment-jsdom ${jsdomVersion}. Major versions MUST match for Jest 27+.`,
+                    fix: `npm install --save-dev jest-environment-jsdom@^${jestMajor}.0.0 --legacy-peer-deps`
+                };
+            }
+        }
+        
+        return { hasIssue: false, diagnosis: '', fix: '' };
+    } catch (error) {
+        logger.warn('detectJsdomIssue pre-check failed', error);
+        return { hasIssue: false, diagnosis: '', fix: '' };
+    }
+}
+
+/**
+ * Execute a minimal Jest smoke test to validate environment
+ * Returns { success: boolean, error: string }
+ */
+async function executeJestSmokeTest(
+    workspaceRoot: string,
+    token: vscode.CancellationToken
+): Promise<{ success: boolean; error: string }> {
+    return new Promise((resolve) => {
+        // Create temporary test file in workspace root (avoids issues with spaces in paths under node_modules)
+        const tempTestFile = path.join(workspaceRoot, '.test-agent-smoke.test.js');
+        
+        try {
+            // Write minimal smoke test — environment-agnostic
+            const smokeTestContent = `
+// Temporary smoke test generated by test-agent
+describe('Jest Environment Validation', () => {
+  it('should execute basic assertions', () => {
+    expect(1 + 1).toBe(2);
+    expect(true).toBeTruthy();
+  });
+});
+`;
+            fs.writeFileSync(tempTestFile, smokeTestContent, 'utf-8');
+            
+            // Execute Jest on this single test using the simple file name pattern
+            // This avoids issues with spaces in workspace paths
+            const jestCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+            
+            const child = spawn(jestCommand, ['jest', '.test-agent-smoke.test.js', '--no-coverage'], {
+                cwd: workspaceRoot,
+                shell: true
+            });
+            
+            let output = '';
+            let errorOutput = '';
+            
+            child.stdout?.on('data', (data) => {
+                output += data.toString();
+            });
+            
+            child.stderr?.on('data', (data) => {
+                errorOutput += data.toString();
+            });
+            
+            child.on('close', (code) => {
+                // Cleanup temp file
+                try {
+                    if (fs.existsSync(tempTestFile)) {
+                        fs.unlinkSync(tempTestFile);
+                    }
+                } catch (cleanupError) {
+                    logger.warn('Failed to cleanup smoke test file', cleanupError);
+                }
+                
+                if (code === 0) {
+                    resolve({ success: true, error: '' });
+                } else {
+                    resolve({ success: false, error: errorOutput || output });
+                }
+            });
+            
+            child.on('error', (error) => {
+                resolve({ success: false, error: `Process error: ${error.message}` });
+            });
+            
+            token.onCancellationRequested(() => {
+                child.kill();
+                resolve({ success: false, error: 'Cancelled by user' });
+            });
+        } catch (error) {
+            resolve({ success: false, error: `Failed to create smoke test: ${error}` });
+        }
+    });
+}
+
+/**
+ * Validate Jest environment with auto-healing loop
+ * This is the main entry point for LLM-first validation and repair
+ */
+async function validateJestEnvironmentAndHeal(
+    workspaceRoot: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    canAutoHeal: boolean = true
+): Promise<boolean> {
+    stream.progress('🔍 Validating Jest environment with smoke test...');
+    
+    let attempt = 0;
+    let lastDiagnosis = '';
+    
+    while (attempt < MAX_HEALING_ATTEMPTS) {
+        attempt++;
+        
+        if (attempt > 1) {
+            stream.markdown(`\n---\n\n### 🔄 Healing Attempt ${attempt}/${MAX_HEALING_ATTEMPTS}\n\n`);
+        }
+        
+        // 1️⃣ PRE-CHECK: Fast detection of common jsdom issues (only if project uses jsdom)
+        const usesJsdom = await projectUsesJsdom(workspaceRoot);
+        const jsdomIssue = usesJsdom ? await detectJsdomIssue(workspaceRoot) : { hasIssue: false, diagnosis: '', fix: '' };
+        
+        if (jsdomIssue.hasIssue && canAutoHeal) {
+            stream.markdown(`⚡ **Pre-check detected known issue:**\n\n`);
+            stream.markdown(`${jsdomIssue.diagnosis}\n\n`);
+            stream.markdown(`🔧 **Auto-fixing...**\n\n`);
+            stream.markdown(`\`\`\`bash\n${jsdomIssue.fix}\n\`\`\`\n\n`);
+            
+            // Auto-execute fix
+            const fixResult = await executeNpmInstall(jsdomIssue.fix, workspaceRoot, stream, token);
+            
+            if (!fixResult.success) {
+                stream.markdown(`❌ **Auto-fix failed:** ${fixResult.error.substring(0, 300)}\n\n`);
+                // Continue to LLM diagnosis
+            } else {
+                stream.markdown(`✅ **Fixed successfully**\n\n`);
+                // Continue to validation
+            }
+        }
+        
+        // 2️⃣ SMOKE TEST: Validate environment with minimal test
+        stream.progress(`Running smoke test (attempt ${attempt})...`);
+        const testResult = await executeJestSmokeTest(workspaceRoot, token);
+        
+        if (testResult.success) {
+            if (attempt === 1) {
+                stream.markdown(`✅ **Jest environment validated successfully**\n\n`);
+            } else {
+                stream.markdown(`\n✅ **Jest environment healed successfully** (attempt ${attempt})\n\n`);
+            }
+            return true;
+        }
+        
+        // 3️⃣ FAILED: Analyze error and attempt repair
+        stream.markdown(`\n⚠️ **Smoke test failed**\n\n`);
+        
+        const errorPreview = testResult.error.substring(0, 600);
+        stream.markdown(`\`\`\`\n${errorPreview}${testResult.error.length > 600 ? '\n...(truncated)' : ''}\n\`\`\`\n\n`);
+        
+        if (!canAutoHeal) {
+            stream.markdown(`❌ **Auto-healing is disabled. Cannot proceed.**\n\n`);
+            return false;
+        }
+        
+        // Check if we're making progress (diagnosis changed)
+        if (attempt > 3 && testResult.error === lastDiagnosis) {
+            stream.markdown(`⚠️ **Error persists unchanged after ${attempt} attempts.**\n\n`);
+            stream.markdown(`This may require manual intervention.\n\n`);
+            return false;
+        }
+        
+        lastDiagnosis = testResult.error;
+        
+        // 4️⃣ LLM DIAGNOSIS: Ask AI for solution
+        stream.markdown(`🧠 **Analyzing error with AI...**\n\n`);
+        stream.progress('Consulting LLM for diagnosis...');
+        
+        try {
+            const llmProvider = LLMProviderFactory.createProvider();
+            const installedPackages = await getInstalledJestPackages(workspaceRoot);
+            const packageJsonPath = path.join(workspaceRoot, 'package.json');
+            const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+            
+            // Use analyzeAndFixError instead of diagnoseInstallError
+            const diagnosis = await llmProvider.analyzeAndFixError(testResult.error, {
+                packageJson,
+                errorType: 'execution',
+                jestConfig: 'testEnvironment: jsdom'
+            });
+            
+            stream.markdown(`**AI Diagnosis:**\n\n${diagnosis.diagnosis}\n\n`);
+            
+            // Build command from packages or commands suggested by LLM
+            let recommendedCommand = '';
+            if (diagnosis.commands && diagnosis.commands.length > 0) {
+                recommendedCommand = diagnosis.commands[0];
+            } else if (diagnosis.packages && diagnosis.packages.length > 0) {
+                recommendedCommand = `install --save-dev ${diagnosis.packages.join(' ')} --legacy-peer-deps`;
+            }
+            
+            if (recommendedCommand) {
+                stream.markdown(`**Recommended fix:**\n\n\`\`\`bash\nnpm ${recommendedCommand}\n\`\`\`\n\n`);
+                stream.markdown(`🔧 **Executing fix automatically...**\n\n`);
+                
+                // Auto-execute LLM's recommended command
+                const healResult = await executeNpmInstall(
+                    recommendedCommand,
+                    workspaceRoot,
+                    stream,
+                    token
+                );
+                
+                if (!healResult.success) {
+                    stream.markdown(`❌ **Fix failed:** ${healResult.error.substring(0, 300)}\n\n`);
+                    // Loop will retry with new diagnosis
+                } else {
+                    stream.markdown(`✅ **Fix executed successfully, re-validating...**\n\n`);
+                    // Loop will re-validate
+                }
+            } else {
+                stream.markdown(`⚠️ **LLM could not provide automatic fix**\n\n`);
+                if (diagnosis.configChanges) {
+                    stream.markdown(`**Suggested config changes:**\n\n\`\`\`json\n${JSON.stringify(diagnosis.configChanges, null, 2)}\n\`\`\`\n\n`);
+                }
+                stream.markdown(`Manual intervention may be required.\n\n`);
+                return false;
+            }
+        } catch (llmError) {
+            logger.error('LLM diagnosis failed', llmError);
+            stream.markdown(`❌ **AI diagnosis failed:** ${llmError}\n\n`);
+            
+            if (attempt >= MAX_HEALING_ATTEMPTS - 2) {
+                stream.markdown(`⚠️ **Maximum healing attempts approaching. Stopping.**\n\n`);
+                return false;
+            }
+        }
+    }
+    
+    // Exhausted all attempts
+    stream.markdown(`\n❌ **Maximum healing attempts (${MAX_HEALING_ATTEMPTS}) reached**\n\n`);
+    stream.markdown(`The Jest environment could not be automatically configured.\n\n`);
+    stream.markdown(`**Please review errors above and consider:**\n`);
+    stream.markdown(`1. Manually installing missing packages\n`);
+    stream.markdown(`2. Checking jest.config.js configuration\n`);
+    stream.markdown(`3. Verifying Node.js/npm versions compatibility\n\n`);
+    
+    return false;
 }
 
 /**
@@ -544,28 +885,46 @@ async function ensureJestEnvironment(
         }
         
         stream.markdown(`\n✅ **Dependencias instaladas correctamente**\n\n`);
+        
+        // 🔍 VALIDATE: Run smoke test and auto-heal if necessary
+        stream.markdown(`\n### 🔬 Validación del Entorno Jest\n\n`);
+        const validated = await validateJestEnvironmentAndHeal(workspaceRoot, stream, token, true);
+        
+        if (!validated) {
+            stream.markdown(`\n❌ **El entorno Jest no pudo ser validado**\n\n`);
+            stream.markdown(`Por favor revisa los errores anteriores y considera realizar ajustes manuales.\n\n`);
+            return false;
+        }
+        
         return true;
     } else {
         stream.markdown(`✅ Entorno Jest listo\n\n`);
-        return true;
+        
+        // Even if dependencies are installed, validate the environment
+        stream.markdown(`\n### 🔬 Validación Final\n\n`);
+        const validated = await validateJestEnvironmentAndHeal(workspaceRoot, stream, token, true);
+        
+        return validated;
     }
 }
 
 /**
- * Handle generation for a single file (original behavior)
+ * Handle generation for a single file.
+ * Uses LLMOrchestrator when available, falls back to legacy TestAgent.
  */
 export async function handleGenerateSingleRequest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
-    stateService: StateService
+    stateService: StateService,
+    orchestrator?: LLMOrchestrator
 ): Promise<vscode.ChatResult> {
     // Get the currently open file
     const activeEditor = vscode.window.activeTextEditor;
     
     if (!activeEditor) {
-        stream.markdown('⚠️ Por favor, abre un archivo TypeScript/TSX para generar tests.\n\n');
-        stream.markdown('**Uso:** Abre un componente SPFx (ej: `MiComponente.tsx`) e invoca `@spfx-tester generate`\n\n');
-        stream.markdown('**O usa:** `@spfx-tester /generate-all` para generar tests de todos los archivos del workspace\n');
+        stream.markdown('⚠️ Por favor, abre un archivo fuente para generar tests.\n\n');
+        stream.markdown('**Uso:** Abre un componente (ej: `MiComponente.tsx`, `service.ts`, `utils.js`) e invoca `@test-agent generate`\n\n');
+        stream.markdown('**O usa:** `@test-agent /generate-all` para generar tests de todos los archivos del workspace\n');
         logger.warn('No active editor found');
         return { metadata: { command: '' } };
     }
@@ -575,9 +934,10 @@ export async function handleGenerateSingleRequest(
 
     logger.debug('Processing file', { fileName, filePath: sourceFilePath });
 
-    // Verify it's a TypeScript/TSX file
-    if (!fileName.endsWith('.ts') && !fileName.endsWith('.tsx')) {
-        stream.markdown('⚠️ Esta extensión solo genera tests para archivos TypeScript (.ts) y TSX (.tsx).\n\n');
+    // Verify it's a supported source file
+    const supportedExtensions = ['.ts', '.tsx', '.js', '.jsx'];
+    if (!supportedExtensions.some(ext => fileName.endsWith(ext))) {
+        stream.markdown('⚠️ Esta extensión genera tests para archivos TypeScript (.ts/.tsx) y JavaScript (.js/.jsx).\n\n');
         logger.warn('Invalid file type', { fileName });
         return { metadata: { command: '' } };
     }
@@ -608,15 +968,28 @@ export async function handleGenerateSingleRequest(
     stream.markdown(`## 🚀 Generando Tests para \`${fileName}\`\n\n`);
     stream.markdown(`Usando workflow agentico con capacidades de auto-reparación...\n\n`);
 
-    // Create and run the test agent
-    const agent = new TestAgent(undefined, stateService);
-    
     try {
-        const testFilePath = await agent.generateAndHealTest(
-            sourceFilePath,
-            workspaceRoot,
-            stream
-        );
+        let testFilePath: string;
+
+        if (orchestrator) {
+            // New tool-based orchestrator path
+            logger.info('Using LLMOrchestrator for test generation');
+            testFilePath = await orchestrator.executeGenerateAndHeal(
+                sourceFilePath,
+                workspaceRoot,
+                stream,
+                'balanced'
+            );
+        } else {
+            // Legacy TestAgent fallback
+            logger.info('Using legacy TestAgent for test generation');
+            const agent = new TestAgent(undefined, stateService);
+            testFilePath = await agent.generateAndHealTest(
+                sourceFilePath,
+                workspaceRoot,
+                stream
+            );
+        }
 
         // Open the generated test file
         const testFileUri = vscode.Uri.file(testFilePath);
@@ -643,7 +1016,8 @@ export async function handleGenerateAllRequest(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
     stateService: StateService,
-    targetPath?: string
+    targetPath?: string,
+    orchestrator?: LLMOrchestrator
 ): Promise<vscode.ChatResult> {
     const batchStartTime = Date.now();
     telemetryService.trackCommandExecution('generate-all');
@@ -787,7 +1161,7 @@ export async function handleGenerateAllRequest(
     for (const [projectRoot, files] of projectMap.entries()) {
         stream.markdown(`### Proyecto: \`${path.basename(projectRoot)}\`\n\n`);
         
-        const agent = new TestAgent(undefined, stateService);
+        const agent = orchestrator ? undefined : new TestAgent(undefined, stateService);
 
         // Use orderedFiles for this project
         const projectFiles = orderedFiles.filter(f => {
@@ -808,11 +1182,20 @@ export async function handleGenerateAllRequest(
             stream.markdown(`\n#### [${currentFile}/${filesWithoutTests.length}] \`${fileName}\`\n`);
 
             try {
-                await agent.generateAndHealTest(
-                    file.fsPath,
-                    projectRoot,
-                    stream
-                );
+                if (orchestrator) {
+                    await orchestrator.executeGenerateAndHeal(
+                        file.fsPath,
+                        projectRoot,
+                        stream,
+                        'balanced'
+                    );
+                } else {
+                    await agent!.generateAndHealTest(
+                        file.fsPath,
+                        projectRoot,
+                        stream
+                    );
+                }
                 successCount++;
                 stream.markdown(`✅ Éxito\n`);
             } catch (error) {
@@ -864,7 +1247,7 @@ export async function handleGenerateAllRequest(
             stream.markdown(`\n### 🔄 Coverage Iteration ${iteration}/${maxCoverageIterations}\n\n`);
             stream.markdown(`Targeting **${filesNeedingCoverage.length}** files below ${coverageThreshold}%\n\n`);
 
-            const iterAgent = new TestAgent(undefined, stateService);
+            const iterAgent = orchestrator ? undefined : new TestAgent(undefined, stateService);
             let iterSuccess = 0;
             let iterFail = 0;
 
@@ -882,7 +1265,11 @@ export async function handleGenerateAllRequest(
                     const fileFolder = vscode.workspace.getWorkspaceFolder(fileUri);
                     const projectRoot = fileFolder?.uri.fsPath || firstProjectRoot;
 
-                    await iterAgent.generateAndHealTest(filePath, projectRoot, stream, 'balanced');
+                    if (orchestrator) {
+                        await orchestrator.executeGenerateAndHeal(filePath, projectRoot, stream, 'balanced');
+                    } else {
+                        await iterAgent!.generateAndHealTest(filePath, projectRoot, stream, 'balanced');
+                    }
                     iterSuccess++;
                     successCount++;
                 } catch (error) {
@@ -993,7 +1380,7 @@ export function handleError(
         stream.markdown('💡 **Sugerencias:**\n');
         stream.markdown('- Revisa el test generado manualmente\n');
         stream.markdown('- Verifica si tu componente tiene dependencias complejas\n');
-        stream.markdown('- Intenta aumentar `spfx-tester.maxHealingAttempts` en la configuración\n');
+        stream.markdown('- Intenta aumentar `test-agent.maxHealingAttempts` en la configuración\n');
         return { errorDetails: { message: error.message } };
     }
 
@@ -1020,8 +1407,8 @@ export function handleError(
     const errorMessage = error instanceof Error ? error.message : 'Ocurrió un error desconocido';
     stream.markdown(`\n❌ **Error Inesperado**\n\n`);
     stream.markdown(`${errorMessage}\n\n`);
-    stream.markdown('💡 **Consejo:** Revisa el canal de salida "SPFX Test Agent" para más detalles.\n');
-    stream.markdown('💡 Usa `View > Output` y selecciona "SPFX Test Agent" del desplegable.\n');
+    stream.markdown('💡 **Consejo:** Revisa el canal de salida "Test Agent" para más detalles.\n');
+    stream.markdown('💡 Usa `View > Output` y selecciona "Test Agent" del desplegable.\n');
     
     // Suggest opening the output channel
     stream.button({

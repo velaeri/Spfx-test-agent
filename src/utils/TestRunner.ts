@@ -89,8 +89,7 @@ export class TestRunner {
             const typesVer = (jestVer && jestVer.major === 28) ? '^28.1.0' : '^29.5.11';
             await pkgService.installPackages(projectRoot, [
                 `ts-jest@${tsJestVer}`,
-                `@types/jest@${typesVer}`,
-                'identity-obj-proxy@^3.0.0'
+                `@types/jest@${typesVer}`
             ]);
 
             if (!this.configService.isTsJestInstalled(projectRoot)) {

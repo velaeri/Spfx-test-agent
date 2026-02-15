@@ -28,7 +28,7 @@ export interface ExtensionConfig {
  * Configuration service to access VS Code settings with caching
  */
 export class ConfigService {
-    private static readonly CONFIG_SECTION = 'spfx-tester';
+    private static readonly CONFIG_SECTION = 'test-agent';
     private static readonly CACHE_KEY = 'extension_config';
     private static readonly CACHE_TTL_MS = 5000; // 5 seconds
     private static instance: ConfigService;

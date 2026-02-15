@@ -390,6 +390,12 @@ ${previousAttempt.error}
 - Ensure Jest ecosystem compatibility`;
         }
 
+        // Extract stack analysis if provided by DependencyDetectionService
+        const stackInfo = packageJsonContent._stackAnalysis;
+        const stackContext = stackInfo
+            ? `\n\n**Project stack analysis (deterministic):**\n- Framework: ${stackInfo.framework}\n- UI library: ${stackInfo.uiLibrary}\n- Language: ${stackInfo.language}\n- Uses JSX: ${stackInfo.usesJsx}\n- Has React: ${stackInfo.hasReact}\n- Has Angular: ${stackInfo.hasAngular}\n- Has Vue: ${stackInfo.hasVue}\n- Test runner: ${stackInfo.testRunner}\n\nBase your recommendations on this analysis. Only suggest packages relevant to this specific stack.`
+            : '';
+
         const prompt = `🔍 Detect missing Jest dependencies with VALID npm versions
 
 **package.json:**
@@ -398,16 +404,32 @@ ${JSON.stringify({
     dependencies: packageJsonContent.dependencies || {},
     devDependencies: packageJsonContent.devDependencies || {}
 }, null, 2)}
-\`\`\`${retryGuidance}
+\`\`\`${stackContext}${retryGuidance}
 
 **CRITICAL RULES:**
 ❌ DO NOT suggest fictional versions
 ✅ USE "latest" if uncertain
 ✅ Ensure jest@29.x → ts-jest@29.x, @types/jest@29.x alignment
 ✅ Use caret ranges (^) for flexibility
+✅ ONLY suggest packages relevant to the detected project type
 
-**Required packages:**
-jest, @types/jest, ts-jest, @testing-library/react, @testing-library/jest-dom, react-test-renderer, @types/react-test-renderer, identity-obj-proxy
+**Always required (universal Jest packages):**
+jest, @types/jest, ts-jest
+
+**Only if the project uses jsdom testEnvironment (React, browser-based UI projects):**
+jest-environment-jsdom, identity-obj-proxy
+
+**Only if the project has React as a dependency:**
+@testing-library/react, @testing-library/jest-dom
+
+**IMPORTANT:** Analyze the ACTUAL dependencies and stack analysis above.
+- If there is NO React dependency, do NOT suggest @testing-library/react, react-test-renderer, etc.
+- If there is NO browser/DOM need, do NOT suggest jest-environment-jsdom.
+- For Node.js CLIs, VS Code extensions, APIs: ONLY suggest jest, @types/jest, ts-jest.
+- Only suggest packages that are actually needed and NOT already installed.
+
+**CRITICAL VERSION ALIGNMENT:**
+- jest-environment-jsdom version MUST match Jest major version (jest@29 → jest-environment-jsdom@29)
 
 **Return ONLY JSON:**
 \`\`\`json

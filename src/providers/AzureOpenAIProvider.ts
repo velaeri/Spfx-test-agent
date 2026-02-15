@@ -190,6 +190,12 @@ If no packages need installing, use empty array. If no commands needed, omit the
     public async detectDependencies(packageJsonContent: any): Promise<Record<string, string>> {
         if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
         
+        // Extract stack analysis if provided by DependencyDetectionService
+        const stackInfo = packageJsonContent._stackAnalysis;
+        const stackContext = stackInfo
+            ? `\n\n**Project stack analysis (deterministic):**\n- Framework: ${stackInfo.framework}\n- UI library: ${stackInfo.uiLibrary}\n- Language: ${stackInfo.language}\n- Uses JSX: ${stackInfo.usesJsx}\n- Has React: ${stackInfo.hasReact}\n- Has Angular: ${stackInfo.hasAngular}\n- Has Vue: ${stackInfo.hasVue}\n- Test runner: ${stackInfo.testRunner}\n\nBase your recommendations on this analysis. Only suggest packages relevant to this specific stack.`
+            : '';
+
         const prompt = `Analyze this package.json and determine which Jest testing dependencies are missing or need to be installed.
 
 **Current package.json dependencies:**
@@ -198,28 +204,34 @@ ${JSON.stringify({
     dependencies: packageJsonContent.dependencies || {},
     devDependencies: packageJsonContent.devDependencies || {}
 }, null, 2)}
-\`\`\`
+\`\`\`${stackContext}
 
 **Task:** 
 1. Analyze the EXISTING dependencies to determine what Jest packages are already installed
-2. Determine what ADDITIONAL packages (if any) are needed for a complete Jest + React Testing Library setup
-3. For any missing packages, recommend versions that are COMPATIBLE with the existing dependencies
+2. Use the stack analysis above to determine what type of project this is
+3. Only recommend packages relevant to the detected project type
 
-**Required packages for full Jest + React Testing Library:**
+**Always required (universal Jest packages):**
 - jest
-- @types/jest  
+- @types/jest
 - ts-jest
+
+**Only if the project uses React (has react in dependencies):**
 - @testing-library/react
 - @testing-library/jest-dom
-- @testing-library/user-event
-- react-test-renderer
-- @types/react-test-renderer
+
+**Only if the project needs jsdom testEnvironment (React, browser-based projects):**
+- jest-environment-jsdom
 - identity-obj-proxy
+
+**IMPORTANT:**
+- Do NOT suggest React-specific packages if React is NOT in the project's dependencies.
+- For Node.js CLIs, VS Code extensions, APIs: ONLY suggest jest, @types/jest, ts-jest.
 
 **CRITICAL RULES:**
 1. ONLY include packages that are NOT already installed
-2. If a package is already installed (even if different version), do NOT include it in the response
-3. Ensure version compatibility with existing React version and other dependencies
+2. If a package is already installed (even if different version), do NOT include it
+3. Ensure version compatibility with existing dependencies
 4. If Jest is already installed, match its major version for related packages
 5. Return ONLY a valid JSON object with MISSING packages, or empty object {} if nothing is missing
 6. Use specific version ranges (e.g., "^28.1.0" not "latest")

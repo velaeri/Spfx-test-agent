@@ -234,7 +234,7 @@ export class CodeAssistantAgent {
             }
 
             stream.markdown('\n---\n\n');
-            stream.markdown('💡 Use `@spfx-tester /help <capability-name>` for detailed help on a specific capability.\n\n');
+            stream.markdown('💡 Use `@test-agent /help <capability-name>` for detailed help on a specific capability.\n\n');
         }
     }
 

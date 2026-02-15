@@ -1,8 +1,8 @@
 {
-  "name": "spfx-test-agent",
+  "name": "test-agent",
   "displayName": "Test Agent",
-  "description": "An agentic workflow extension that automates unit test creation for any JavaScript/TypeScript project",
-  "version": "0.6.11",
+  "description": "Autonomous QA agent that generates, runs, and self-heals unit tests for any JS/TS project using an LLM-first tool-calling architecture",
+  "version": "0.7.0",
   "publisher": "velaeri",
   "repository": {
     "type": "git",

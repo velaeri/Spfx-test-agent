@@ -1,9 +1,73 @@
 # Changelog
 
-All notable changes to the "spfx-test-agent" extension will be documented in this file.
+All notable changes to the **Test Agent** extension will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+## [0.7.0] - 2026-02-15
+
+### **MAJOR: LLM-First Tool-Calling Architecture**
+
+Complete architectural migration from an imperative 13-service design to a hybrid LLM-first tool-calling architecture.
+
+#### New: Agentic Orchestrator
+- **`LLMOrchestrator`** — Implements an agentic loop where the LLM decides which tools to call, in what order, and with what parameters. Loops up to 10 iterations until the task is complete.
+- **`OrchestratorFactory`** — Creates a `ToolRegistry` with all 8 tools and wires in the LLM provider.
+- Two execution modes: free-form (`execute()`) for full LLM autonomy, and predefined workflow (`executeGenerateAndHeal()`) for structured generate → run → fix cycles.
+
+#### New: Tool System
+- **`BaseTool`** abstract class — Standard interface for all tools with typed parameters, validation, and structured results.
+- **`ToolRegistry`** — Central registry with `register()`, `execute()`, `buildToolsPrompt()`, and `parseToolCalls()`.
+- **`ToolTypes`** — Core types: `ToolParameter`, `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolExecutionContext`.
+
+#### New: 6 Deterministic Tools
+| Tool | Purpose |
+|---|---|
+| `ListSourceFilesTool` | Find `.ts`, `.tsx`, `.js`, `.jsx` source files |
+| `ReadFileTool` | Read file contents from disk |
+| `WriteFileTool` | Write test files to disk |
+| `RunTestTool` | Execute Jest on a specific test file |
+| `AnalyzeProjectTool` | Detect project stack via `StackDiscoveryService` |
+| `CollectContextTool` | Gather imports, types, and dependency context |
+
+#### New: 2 Intelligent Tools
+| Tool | Purpose |
+|---|---|
+| `GenerateTestTool` | Generate test files using LLM with full source context |
+| `FixTestTool` | Fix failing tests using LLM with error output context |
+
+#### Decoupled from SPFx
+- **All IDs renamed**: `spfx-test-agent.*` → `test-agent.*`, `@spfx-tester` → `@test-agent`
+- **Framework-agnostic**: Removed all SPFx-specific hardcoded logic
+- **Extended file support**: Added `.js` / `.jsx` scanning alongside `.ts` / `.tsx`
+- **Generalized patterns**: `spfxPatterns` → `frameworkPatterns` throughout `SourceContextCollector`
+- **Multi-framework detection**: Added Angular, Vue, Next.js, Express, VS Code Extension detection
+
+#### Smart Project-Aware Dependency Detection (3-layer system)
+1. **StackDiscoveryService** (deterministic) — Analyzes `package.json`, config files, and directory structure
+2. **LLM with enriched context** — Stack analysis injected into the prompt for context-aware suggestions
+3. **`filterByStack()` guardrail** (deterministic) — Post-LLM filter removes irrelevant packages
+
+#### Environment-Agnostic Smoke Test
+- Smoke test changed from jsdom-specific (`typeof window === 'object'`) to universal (`expect(1+1).toBe(2)`)
+- jsdom pre-check now conditional on `projectUsesJsdom()` helper that inspects jest config files
+
+#### Provider Prompt Improvements
+- `CopilotProvider.detectDependencies()` and `AzureOpenAIProvider.detectDependencies()` prompts no longer hardcode React packages as required
+- Prompts now include `_stackAnalysis` context block with detected framework, UI library, and test runner
+- Reduced fallback dependency list to only `jest`, `@types/jest`, `ts-jest`
+
+#### Extension Wiring
+- `extension.ts` now creates `LLMOrchestrator` on activation and passes it to `ChatHandlers`
+- `handleGenerateAllRequest()` and `handleGenerateSingleRequest()` receive the orchestrator as parameter
+
+#### Tests
+- All 319 tests passing across 23 suites
+- TypeScript compilation clean (`tsc --noEmit`)
+- Updated tests for renamed IDs, generalized patterns, and new file scanning behavior
 
 ---
 

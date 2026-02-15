@@ -1,206 +1,284 @@
-# SPFX Test Agent - Ingeniero de QA Autónomo con Arquitectura LLM-First
+# Test Agent — Autonomous QA Engineer with LLM-First Tool-Calling Architecture
 
-**SPFX Test Agent** es una extensión revolucionaria para Visual Studio Code que transforma tu flujo de trabajo de desarrollo en SharePoint Framework.
+**Test Agent** is a VS Code extension that acts as an **autonomous QA engineer**. It generates, runs, and self-heals unit tests for any JavaScript/TypeScript project.
 
-No es un simple asistente de chat — es un **agente autónomo inteligente** que actúa como un ingeniero de QA senior. La extensión funciona como un **orquestador puro** donde el LLM analiza, decide, ejecuta, valida y reitera de forma completamente autónoma.
-
-## 🚀 Novedades en v0.5.1 — **Arquitectura LLM-First Completa**
-
-### 🧠 **Transformación Fundamental**
-La versión 0.5.0 representa una **refactorización arquitectónica total**. La extensión ya no contiene lógica hardcoded para decisiones críticas — **el LLM decide todo**.
-
-### ✨ **Nuevas Capacidades LLM-First**
-
-#### 1. **Planificación Inteligente de Estrategia de Testing**
-Antes de generar cualquier test, el LLM analiza tu código y decide:
-- **Enfoque óptimo**: Unit / Integration / Component testing
-- **Estrategia de mocking**: Minimal / Moderate / Extensive
-- **Mocks específicos necesarios** para tu archivo
-- **Cobertura esperada** y posibles problemas
-- **Iteraciones de auto-reparación estimadas**
-
-```text
-🧠 Test Strategy Planned by LLM:
-- Approach: component
-- Mocking: moderate  
-- Mocks needed: SPHttpClient, @microsoft/sp-core-library
-- Est. iterations: 2
-```
-
-#### 2. **Configuración Jest Personalizada por LLM**
-El comando `/setup` ya no usa templates hardcoded:
-- **Analiza** tu `package.json`, `tsconfig.json`, y tests existentes
-- **Detecta** automáticamente tu framework (SPFx, React, Angular, Next.js...)
-- **Genera** una configuración Jest optimizada específicamente para tu proyecto
-- **Crea** mocks personalizados según tus dependencias reales
-
-#### 3. **Priorización Inteligente de Batch Generation**
-El comando `/generate-all` ahora usa el LLM para decidir:
-- **Qué archivos procesar primero** (críticos/fundacionales antes)
-- **Cómo agruparlos** según dependencias y complejidad
-- **Tiempo estimado** y concurrencia recomendada
-
-```text
-🧠 Batch Generation Plan (by LLM):
-**Core Services** (Priority 1): 5 files
-  _Foundation services used by other components_
-
-**React Components** (Priority 2): 12 files  
-  _UI components depending on services_
-  
-Estimated time: 8-12 minutes
-Recommended concurrency: 2
-```
-
-#### 4. **Detección de Dependencias Sin Versiones Hardcoded**
-**BREAKING CHANGE**: Eliminadas todas las versiones hardcoded de Jest y dependencias.
-- El LLM detecta versiones compatibles dinámicamente
-- 3 reintentos con feedback si falla
-- Fallback a npm `"latest"` (NO versiones hardcoded)
+The extension uses a **hybrid LLM-first architecture** where an agentic orchestrator gives the LLM access to deterministic and intelligent tools, letting it analyze your project, generate tests, execute them, and fix failures in a fully autonomous loop.
 
 ---
 
-## 🏗️ **Filosofía: LLM-First Architecture**
+## Architecture Overview
 
-### **¿Qué significa LLM-First?**
-
-La extensión es un **orquestador puro** — toda la lógica estratégica reside en el LLM:
-
-**Antes (v0.4.x):**
-```typescript
-// ❌ Lógica hardcoded
-const jestVersion = "^29.7.0"; // Versión fija
-const config = DEFAULT_JEST_CONFIG; // Template fijo
-processFiles(files); // Orden arbitrario
+```
+User ──► @test-agent /generate
+              │
+              ▼
+      ┌───────────────────┐
+      │  LLMOrchestrator   │  ◄── Agentic loop (max 10 iterations)
+      │  (execute())       │
+      └────────┬──────────┘
+               │  LLM decides which tools to call
+               ▼
+      ┌───────────────────────────────────────────┐
+      │              ToolRegistry (8 tools)        │
+      ├───────────────────┬───────────────────────┤
+      │  Deterministic    │  Intelligent           │
+      │  ─────────────    │  ───────────           │
+      │  ListSourceFiles  │  GenerateTest (LLM)    │
+      │  ReadFile         │  FixTest (LLM)         │
+      │  WriteFile        │                        │
+      │  RunTest          │                        │
+      │  AnalyzeProject   │                        │
+      │  CollectContext   │                        │
+      └───────────────────┴───────────────────────┘
 ```
 
-**Ahora (v0.5.x):**
-```typescript
-// ✅ LLM decide todo
-const versions = await llm.detectDependencies(pkg); // Dinámico
-const config = await llm.generateJestConfig(analysis); // Personalizado
-const plan = await llm.planBatchGeneration(files); // Priorizado
-const strategy = await llm.planTestStrategy(code); // Analizado
-```
-
-### **Flujo LLM-First:**
-1. **ANALIZA** → LLM examina tu proyecto completo
-2. **PLANIFICA** → LLM decide estrategia óptima
-3. **EJECUTA** → Extension ejecuta el plan
-4. **VALIDA** → LLM evalúa resultados
-5. **REITERA** → LLM decide si repetir/ajustar
-
-**Resultado**: Cero asunciones. Todo adaptado a TU proyecto específico.
+**How it works:**
+1. The orchestrator sends the user's request + available tool definitions to the LLM
+2. The LLM responds with tool calls (JSON in markdown code blocks)
+3. The orchestrator executes the tools and feeds results back to the LLM
+4. The loop continues until the LLM responds with `DONE` or max iterations is reached
 
 ---
 
-## Características Principales
+## Features
 
-### 🔄 Ciclo de Vida Completamente Autónomo (LLM-First)
-1. **Planifica** → LLM analiza código y define estrategia antes de generar
-2. **Genera** → LLM escribe test siguiendo la estrategia planificada
-3. **Ejecuta** → Jest corre el test en entorno aislado
-4. **Analiza** → LLM diagnostica errores con contexto completo
-5. **Repara** → LLM reescribe el test con correcciones específicas
-6. **Reitera** → Hasta 3/5 veces según modo (fast/balanced/thorough)
+### Autonomous Test Generation & Self-Healing
+1. **Analyzes** → LLM inspects your source code with `ReadFile` and `CollectContext` tools
+2. **Generates** → LLM writes the test via `GenerateTest` tool
+3. **Executes** → `RunTest` tool runs Jest in an isolated environment
+4. **Diagnoses** → If the test fails, LLM reads the error output
+5. **Heals** → `FixTest` tool regenerates the test with corrections
+6. **Iterates** → Up to 3–5 healing cycles (configurable)
 
-### 🛡️ Configuración Inteligente y Personalizada
-- **Setup por LLM**: `/setup` genera `jest.config.js` optimizado para TU proyecto
-- **Detección de Framework**: SPFx, React, Angular, Next.js, Vue identificados automáticamente
-- **Mocks Personalizados**: Crea mocks específicos según tus dependencias reales
-- **Scripts Optimizados**: Actualiza `package.json` con comandos Jest apropiados
+### Smart Project-Aware Dependency Detection
+A 3-layer intelligence system ensures the right packages are installed:
+1. **Layer 1 — StackDiscoveryService** (deterministic): Detects framework, UI library, test runner, package manager, module system from `package.json` and config files
+2. **Layer 2 — LLM with enriched context**: The stack analysis is injected into the prompt so the LLM suggests only relevant packages
+3. **Layer 3 — `filterByStack()` guardrail** (deterministic): Post-LLM filter removes packages irrelevant to the detected stack (e.g., React testing packages for a Node.js CLI project)
 
-### 🧠 Inteligencia Contextual Profunda
-- **Análisis de Dependencias**: Lee archivos importados para entender tipos e interfaces reales
-- **Detección de Patrones**: Identifica automáticamente WebParts, Extensiones, PnP JS, Fluent UI
-- **Contexto de Configuración**: Interpreta `tsconfig.json` y `package.json` para adaptar tests
-- **Patrones Existentes**: Aprende de tus tests actuales para mantener consistencia
+### Framework Detection
+Automatically detects: **React**, **Angular**, **Vue**, **Next.js**, **Express**, **SPFx**, **VS Code Extensions**, and more.
 
-### 🚀 Generación en Batch Inteligente
-- **Priorización por LLM**: `/generate-all` procesa archivos en orden óptimo
-- **Agrupación Inteligente**: Agrupa por dependencias y complejidad
-- **Estimación de Tiempo**: Calcula duración y recomienda concurrencia
-- **Coverage-Driven**: Itera automáticamente sobre archivos con baja cobertura
+### Multi-Provider LLM Support
+- **GitHub Copilot** — Native integration, no configuration needed
+- **Azure OpenAI** — Configure your own endpoint for corporate models
+- **Graceful fallback** — Degrades to sensible defaults if LLM is unavailable
 
-### 🤖 Soporte Multi-Proveedor LLM
-- **GitHub Copilot**: Integración nativa sin configuración (GPT-4 Turbo)
-- **Azure OpenAI**: Configura tu propio endpoint para modelos corporativos
-- **Fallback Graceful**: Degrada elegantemente a defaults si LLM no disponible
+---
 
-## Instalación y Requisitos
+## Commands
 
-**Requisitos Previos:**
+| Chat Command | Description |
+|---|---|
+| `@test-agent /setup` | Set up Jest environment (install dependencies + create config) |
+| `@test-agent /install` | Install Jest dependencies with AI-powered error resolution |
+| `@test-agent /generate` | Generate and heal unit tests for the active file |
+| `@test-agent /generate-all` | Generate tests for all source files in the workspace |
+
+| VS Code Command | Description |
+|---|---|
+| `Test Agent: Setup Jest Environment` | Same as `/setup` |
+| `Test Agent: Check Jest Environment Setup` | Verify Jest installation status |
+| `Test Agent: Install with Suggested Command` | Run an LLM-suggested install command |
+
+---
+
+## Quick Start
+
+### Prerequisites
 - VS Code 1.85.0+
 - Node.js v18+
-- Una suscripción activa a **GitHub Copilot** (o acceso a Azure OpenAI)
+- An active **GitHub Copilot** subscription (or Azure OpenAI access)
 
-**Instalación:**
-1. Instala la extensión desde el Marketplace (o carga el `.vsix`).
-2. Abre tu proyecto SPFx.
+### Getting Started
+1. Install the extension from the Marketplace (or load the `.vsix` file).
+2. Open any JavaScript/TypeScript project.
+3. Open the Copilot Chat panel (`Ctrl+Alt+I`).
+4. Run: `@test-agent /setup` — The agent will install Jest and configure everything.
+5. Open a source file and run: `@test-agent /generate` — The agent will create and validate tests automatically.
 
-## Guía de Uso
+### Example Flow
 
-### 1. Configuración Inicial
-Si es tu primera vez probando este proyecto:
-1. Abre el Chat de Copilot (`Ctrl+Alt+I`).
-2. Escribe: `@spfx-tester /setup`
-   - El agente instalará `jest`, `ts-jest`, `identity-obj-proxy` y configurará todo automáticamente.
+```
+You: @test-agent /generate
 
-### 2. Generar Tests
-1. Abre cualquier archivo TypeScript/React (`.ts` o `.tsx`).
-2. En el chat, escribe: `@spfx-tester /generate`
-   - Opción: `@spfx-tester /generate --mode thorough` para 5 intentos de auto-reparación.
-
-### 3. Ejemplo de Flujo Real
-
-```text
-Tú: @spfx-tester /generate
-
-Agente: 🚀 Iniciando generación para HelloWorld.tsx
-       📦 Analizadas 4 dependencias importadas
-       🔍 Detectado: React Component, SPFx WebPart Context
+Agent: 🚀 Starting generation for UserService.ts
+       📦 Analyzed 6 imported dependencies
+       🔍 Detected: Express middleware, TypeScript
        
-       ✅ Test generado: HelloWorld.test.tsx
-       Ejecutando Jest...
+       ✅ Test generated: UserService.test.ts
+       Running Jest...
        
-       ⚠️ El test falló (intento 1/3). 
-       Error: "Text 'Welcome' not found in document"
-       Analizando causa raíz...
+       ⚠️ Test failed (attempt 1/3)
+       Error: "Cannot find module '../db/connection'"
+       Analyzing root cause...
        
-       🔄 Corrigiendo test (intento 2)...
-       Ajustando selector de testing-library...
+       🔄 Fixing test (attempt 2)...
+       Adding mock for database module...
        
-       ✅ ¡Test Pasado! (Total: 4.2s)
+       ✅ Test Passed! (Total: 3.8s)
        📊 1 passed, 0 failed
 ```
 
-## Arquitectura Técnica
+---
 
-El agente opera mediante un sistema de **Inyección de Dependencias** y **Patrón Factoría**:
+## Configuration
 
-- **Core Agent**: Orquesta el ciclo de lectura-escritura-ejecución.
-- **SourceContextCollector**: "Araña" el sistema de archivos para construir un mapa mental del código.
-- **LLM Provider Factory**: Abstrae la inteligencia (Copilot o Azure OpenAI).
-- **Test Runner Isolator**: Ejecuta Jest de forma quirúrgica sobre un solo archivo.
+All settings use the `test-agent.*` prefix in VS Code settings:
 
-### Configuración Avanzada
-
-Puedes personalizar el comportamiento en `settings.json`:
-- `spfxTestAgent.maxHealingAttempts`: Número de intentos de auto-corrección (Default: 3).
-- `spfxTestAgent.azureOpenAI`: Configuración para usar Azure en lugar de Copilot.
-- `spfxTestAgent.testFilePattern`: Patrón de nombrado (ej: `${fileName}.test.${ext}`).
-
-## Solución de Problemas
-
-### "Jest command failed"
-Asegúrate de haber ejecutado `@spfx-tester /setup` primero. El agente intentará detectar si faltan paquetes y te ofrecerá instalarlos.
-
-### "Rate Limited"
-Si usas la API pública de Copilot mucho, puedes sufrir limitaciones de velocidad. El agente tiene "backoff exponencial" (espera inteligente), pero puedes pausar unos segundos.
-
-### Errores de "getVmContext"
-Esto suele ser un conflicto entre Jest 29+ y JSDOM. El agente ahora detecta esto y lo arregla automáticamente instalando el entorno correcto.
+| Setting | Default | Description |
+|---|---|---|
+| `test-agent.maxHealingAttempts` | `3` | Max self-healing attempts per test |
+| `test-agent.initialBackoffMs` | `1000` | Backoff between retry attempts (ms) |
+| `test-agent.maxRateLimitRetries` | `5` | Max retries on rate limit |
+| `test-agent.maxTokensPerError` | `1500` | Max error chars sent to LLM |
+| `test-agent.testFilePattern` | `${fileName}.test.${ext}` | Test file naming pattern |
+| `test-agent.jestCommand` | `npx jest` | Jest execution command |
+| `test-agent.llmProvider` | `copilot` | LLM provider (`copilot` or `azure-openai`) |
+| `test-agent.llmVendor` | `copilot` | Vendor for `vscode.lm.selectChatModels` |
+| `test-agent.llmFamily` | _(empty)_ | Model family (e.g., `gpt-4`). Empty = user's default |
+| `test-agent.azureOpenAI.endpoint` | _(empty)_ | Azure OpenAI endpoint URL |
+| `test-agent.azureOpenAI.apiKey` | _(empty)_ | Azure OpenAI API key |
+| `test-agent.azureOpenAI.deploymentName` | _(empty)_ | Azure OpenAI deployment name |
+| `test-agent.enableTelemetry` | `false` | Enable anonymous telemetry |
+| `test-agent.logLevel` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
 
 ---
-**Desarrollado con ❤️ para la comunidad de SharePoint Framework.**
-Licencia MIT.
+
+## Architecture Deep Dive
+
+### Tool System
+
+All tools extend `BaseTool` and implement:
+- `name` / `description` — Used to build the LLM system prompt
+- `parameters` — Typed parameter definitions (name, type, required)
+- `execute(params, context)` — Returns `ToolResult { success, data?, error? }`
+
+**Deterministic Tools** (no LLM, pure logic):
+| Tool | Purpose |
+|---|---|
+| `list_source_files` | Find `.ts`, `.tsx`, `.js`, `.jsx` files in the workspace |
+| `read_file` | Read file contents from disk |
+| `write_file` | Write test files to disk |
+| `run_test` | Execute Jest on a specific test file |
+| `analyze_project` | Run `StackDiscoveryService` to detect project stack |
+| `collect_context` | Gather imports, types, and dependency context for a source file |
+
+**Intelligent Tools** (use LLM internally):
+| Tool | Purpose |
+|---|---|
+| `generate_test` | Generate a test file using LLM with full source context |
+| `fix_test` | Fix a failing test using LLM with error output context |
+
+### Orchestrator
+
+The `LLMOrchestrator` implements an **agentic loop**:
+1. Builds a system prompt containing all tool definitions (name, description, parameters, return type)
+2. Sends the user request to the LLM
+3. Parses tool calls from the response (JSON in fenced code blocks — `vscode.lm` API doesn't support native function calling)
+4. Executes the requested tools via `ToolRegistry`
+5. Feeds tool results back to the LLM as conversation history
+6. Repeats until the LLM signals completion or max iterations (10) is reached
+
+Two execution modes:
+- **Free-form** (`execute()`) — LLM has full autonomy over tool selection and order
+- **Predefined workflow** (`executeGenerateAndHeal()`) — Structured generate → run → fix cycle
+
+### Service Layer
+
+| Service | Purpose |
+|---|---|
+| `ConfigService` | Read extension settings |
+| `Logger` | Structured logging with configurable levels |
+| `StateService` | Persist state across sessions via VS Code globalState |
+| `TelemetryService` | Anonymous usage telemetry |
+| `CacheService` | Cache LLM responses to reduce API calls |
+| `StackDiscoveryService` | Detect project framework, language, UI library, test runner, package manager |
+| `DependencyDetectionService` | LLM-first dependency version detection with npm registry validation |
+| `JestConfigurationService` | LLM-assisted Jest config generation |
+| `ProjectSetupService` | Orchestrate `/setup` and `/install` flows |
+| `QueueService` | Manage batch generation queue |
+| `CoverageService` | Parse and track test coverage |
+| `DependencyGraphService` | Build import dependency graphs |
+| `PackageInstallationService` | Execute npm/yarn/pnpm install commands |
+
+### Provider Layer
+
+Both providers implement `ILLMProvider` (which extends `ICoreProvider`):
+
+- **CopilotProvider** — Uses `vscode.lm.selectChatModels()` to call GitHub Copilot models
+- **AzureOpenAIProvider** — Uses the `@azure/openai` SDK with a custom endpoint
+
+Key methods: `generateTest()`, `fixTest()`, `planTestStrategy()`, `generateJestConfig()`, `detectDependencies()`, `planBatchGeneration()`, `validateAndFixVersions()`, `analyzeAndFixError()`, `sendPrompt()`
+
+### Extensibility Layer
+
+The extension also includes a **capability-based plugin architecture** (v0.6.0+):
+- `ICoreProvider` — Minimal generic LLM interface (`sendPrompt`, `isAvailable`)
+- `ILLMCapability<TInput, TOutput>` — Plugin interface for adding new capabilities
+- `CodeAssistantAgent` — Generic capability orchestrator with `registerCapability()`, `execute()`, `autoExecute()`
+- `CoreProviderAdapter` — Bridge from `ICoreProvider` to `ILLMProvider` for backward compatibility
+- `TestGenerationCapability` — Testing wrapped as a capability plugin
+
+This enables future capabilities like code refactoring, architecture analysis, or documentation generation without modifying core code.
+
+---
+
+## Project Structure
+
+```
+src/
+├── extension.ts                    # Entry point: registers participant, commands, orchestrator
+├── ChatHandlers.ts                 # Routes chat commands to handlers
+├── orchestrator/
+│   ├── LLMOrchestrator.ts          # Agentic loop with tool calling
+│   ├── OrchestratorFactory.ts      # Creates ToolRegistry with all 8 tools
+│   └── index.ts
+├── tools/
+│   ├── BaseTool.ts                 # Abstract base class for all tools
+│   ├── ToolRegistry.ts             # Tool storage, lookup, and prompt building
+│   ├── ToolTypes.ts                # ToolParameter, ToolDefinition, ToolCall, ToolResult
+│   ├── deterministic/              # 6 tools: file I/O, test execution, project analysis
+│   └── intelligent/                # 2 tools: generate test, fix test (use LLM)
+├── providers/
+│   ├── CopilotProvider.ts          # GitHub Copilot via vscode.lm API
+│   └── AzureOpenAIProvider.ts      # Azure OpenAI via @azure/openai SDK
+├── interfaces/
+│   ├── ILLMProvider.ts             # Full provider interface (testing-specific methods)
+│   ├── ICoreProvider.ts            # Minimal generic LLM interface
+│   └── ILLMCapability.ts           # Capability plugin interface
+├── agent/
+│   ├── TestAgent.ts                # Self-healing test generation agent
+│   └── CodeAssistantAgent.ts       # Generic capability orchestrator
+├── adapters/
+│   └── CoreProviderAdapter.ts      # ICoreProvider → ILLMProvider bridge
+├── capabilities/
+│   └── TestGenerationCapability.ts # Testing as a capability plugin
+├── services/                       # 13 services (config, logging, stack detection, etc.)
+├── utils/                          # File scanning, test running, prompts, constants
+├── errors/                         # Custom error types
+└── factories/
+    └── LLMProviderFactory.ts       # Creates CopilotProvider or AzureOpenAIProvider
+```
+
+---
+
+## Troubleshooting
+
+### "Jest command failed"
+Run `@test-agent /setup` first. The agent will detect missing packages and install them.
+
+### "Rate Limited"
+The agent implements exponential backoff. If you hit rate limits frequently, wait a few seconds between commands or configure `test-agent.maxRateLimitRetries`.
+
+### Tests always failing
+Check the Output panel (`Test Agent`) for detailed logs. Set `test-agent.logLevel` to `debug` for verbose output. Common causes:
+- Missing mocks for external modules
+- Incorrect Jest environment (node vs jsdom)
+- TypeScript compilation errors in test files
+
+---
+
+## License
+
+MIT

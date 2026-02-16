@@ -2,7 +2,7 @@
   "name": "test-agent",
   "displayName": "Test Agent",
   "description": "Autonomous QA agent that generates, runs, and self-heals unit tests for any JS/TS project using an LLM-first tool-calling architecture",
-  "version": "0.7.0",
+  "version": "0.7.6",
   "publisher": "velaeri",
   "repository": {
     "type": "git",
@@ -10,7 +10,8 @@
   },
   "license": "MIT",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.85.0",
+    "node": ">=22"
   },
   "categories": [
     "Chat",
@@ -178,11 +179,11 @@
     "version:major": "npm version major --no-git-tag-version",
     "deploy": "npm run clean && npm run version:patch && npm run package:vsix && npm run install:vsix",
     "lint": "eslint src --ext ts",
-    "test": "echo \"No tests specified\""
+    "test": "jest --config jest.config.js"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",
-    "@types/node": "^18.x",
+    "@types/node": "^22.x",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
@@ -197,5 +198,8 @@
   },
   "optionalDependencies": {
     "@azure/openai": "^1.0.0-beta.12"
+  },
+  "volta": {
+    "node": "22.22.0"
   }
 }

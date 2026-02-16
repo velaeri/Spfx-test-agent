@@ -492,7 +492,7 @@ export class RepairLoop {
                 sourceCode: context.sourceCode,
                 fileName: context.fileName,
                 currentTestCode,
-                errorOutput: error.rawOutput.substring(0, 3000),
+                errorContext: error.rawOutput.substring(0, 3000),
                 attempt: attempt + 1,
                 dependencyContext: context.dependencyContext,
             });

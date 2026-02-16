@@ -2,8 +2,8 @@
   "name": "test-agent",
   "displayName": "Test Agent",
   "description": "Autonomous QA agent that generates, runs, and self-heals unit tests for any JS/TS project using an LLM-first tool-calling architecture",
-  "version": "0.7.6",
-  "publisher": "velaeri",
+  "version": "0.7.8",
+  "publisher": "evela",
   "repository": {
     "type": "git",
     "url": "https://github.com/velaeri/Spfx-test-agent"

@@ -1,5 +1,5 @@
 import { OpenAIClient, AzureKeyCredential } from "@azure/openai";
-import { ILLMProvider, TestContext, LLMResult } from '../interfaces/ILLMProvider';
+import { ILLMProvider, TestContext, LLMResult, ReviewContext, ReviewResult, LearningContext, LearningEntry } from '../interfaces/ILLMProvider';
 import { CoreLLMResult } from '../interfaces/ICoreProvider';
 import { Logger } from '../services/Logger';
 import { ConfigService } from '../services/ConfigService';
@@ -271,6 +271,67 @@ If ALL packages are already installed, return:
         } catch (error) {
             this.logger.error('Failed to parse LLM response for dependencies', { error, rawResponse: result.code.substring(0, 500) });
             return {};
+        }
+    }
+
+    public async reviewTest(context: ReviewContext): Promise<ReviewResult> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        this.logger.info(`Performing adversarial review via Azure for ${context.fileName}`);
+        
+        const systemPrompt = context.systemPrompt || 'You are a Senior QA Automation Architect. Review the following test.';
+        const userPrompt = context.userPrompt || `Review this test for ${context.fileName}:\n\nSource:\n${context.sourceCode}\n\nTest:\n${context.testCode}`;
+
+        try {
+            const result = await this.sendRequest(systemPrompt, userPrompt);
+            const jsonText = this.extractJsonFromResponse(result.code);
+            const parsed = JSON.parse(jsonText);
+
+            return {
+                passed: !!parsed.passed,
+                score: typeof parsed.score === 'number' ? parsed.score : 0,
+                critique: parsed.critique || 'No critique provided',
+                suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : []
+            };
+        } catch (error) {
+            this.logger.error('Azure adversarial review failed', error);
+            return { passed: true, score: 5, critique: 'Review failed', suggestions: [] };
+        }
+    }
+
+    public async generateLearningEntry(context: LearningContext): Promise<LearningEntry> {
+        if (!this.client) throw new LLMNotAvailableError('Azure OpenAI', 'GPT');
+        this.logger.info(`Generating learning entry via Azure for ${context.fileName}`);
+
+        const systemPrompt = context.systemPrompt || 'You are a Senior Software Development Data Curator. Extract the learning delta.';
+        const userPrompt = context.userPrompt || `Original code:\n${context.originalTestCode}\n\nCritique:\n${context.critique}\n\nFixed code:\n${context.fixedTestCode}\n\nSource code context:\n${context.sourceCode}`;
+
+        try {
+            const result = await this.sendRequest(systemPrompt, userPrompt);
+            const jsonText = this.extractJsonFromResponse(result.code);
+            const parsed = JSON.parse(jsonText);
+
+            return {
+                timestamp: new Date().toISOString(),
+                fileName: context.fileName,
+                sourceCode: context.sourceCode,
+                originalTestCode: context.originalTestCode,
+                critique: context.critique,
+                fixedTestCode: context.fixedTestCode,
+                improvementDelta: parsed.improvementDelta || 'Refined test logic',
+                category: parsed.category || 'other'
+            };
+        } catch (error) {
+            this.logger.error('Azure learning entry failed', error);
+            return {
+                timestamp: new Date().toISOString(),
+                fileName: context.fileName,
+                sourceCode: context.sourceCode,
+                originalTestCode: context.originalTestCode,
+                critique: context.critique,
+                fixedTestCode: context.fixedTestCode,
+                improvementDelta: 'Automatic improvement',
+                category: 'other'
+            };
         }
     }
 

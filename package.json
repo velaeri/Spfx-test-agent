@@ -65,6 +65,14 @@
           {
             "name": "generate-quality",
             "description": "Generate high-quality tests using the golden policy pipeline (any JS/TS project)"
+          },
+          {
+            "name": "generate-deep",
+            "description": "Generate tests with adversarial review and learning capture (Deep Quality)"
+          },
+          {
+            "name": "generate-all-deep",
+            "description": "Generate tests for the entire project with Deep Quality and Learning capture"
           }
         ]
       }

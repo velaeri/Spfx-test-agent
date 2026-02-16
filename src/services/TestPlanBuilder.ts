@@ -23,7 +23,7 @@ import {
 // ────────────────────────────────────────────────────
 
 export type TestPlanPriority = 'P0' | 'P1' | 'P2';
-export type TestPlanAction = 'create' | 'repair' | 'extend' | 'delete';
+export type TestPlanAction = 'create' | 'repair' | 'extend' | 'delete' | 'refine';
 
 export interface TestPlanItem {
     sourceFile: string;
@@ -81,11 +81,13 @@ export class TestPlanBuilder {
     buildPlan(
         inspection: RepoInspection,
         inventory?: TestInventoryItem[],
-        maxFiles: number = 50
+        maxFiles: number = 50,
+        deepMode: boolean = false
     ): TestPlan {
         this.logger.info('TestPlanBuilder: building plan', {
             sourceFiles: inspection.paths.sourceFiles.length,
             existingTests: inspection.paths.existingTestFiles.length,
+            deepMode
         });
 
         const plan: TestPlan = {
@@ -98,9 +100,9 @@ export class TestPlanBuilder {
             refactorSuggestions: [],
         };
 
-        // Step 1: Process existing tests (repair/delete filler)
+        // Step 1: Process existing tests (repair/delete filler/refine in deep mode)
         if (inventory) {
-            this.processInventory(inventory, plan);
+            this.processInventory(inventory, plan, deepMode);
         }
 
         // Step 2: Find uncovered source files
@@ -167,7 +169,8 @@ export class TestPlanBuilder {
 
     private processInventory(
         inventory: TestInventoryItem[],
-        plan: TestPlan
+        plan: TestPlan,
+        deepMode: boolean = false
     ): void {
         for (const item of inventory) {
             switch (item.status) {
@@ -193,8 +196,23 @@ export class TestPlanBuilder {
                     this.logger.debug(`Orphan test: ${item.testFile}`);
                     break;
 
+                case 'passing':
+                    if (deepMode) {
+                        plan.p0.push({
+                            sourceFile: item.sourceFile || '',
+                            testFile: item.testFile,
+                            tier: 1, // Re-classified
+                            priority: 'P0',
+                            action: 'refine',
+                            reason: `Deep Mode: Proposing improvements to existing passing test`,
+                            estimatedMocks: [],
+                            estimatedTests: 0,
+                        });
+                    }
+                    break;
+
                 default:
-                    // passing or unknown — leave as is
+                    // unknown — leave as is
                     break;
             }
         }

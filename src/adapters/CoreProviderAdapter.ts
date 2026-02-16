@@ -6,7 +6,11 @@ import {
     ProjectAnalysis, 
     TestStrategy,
     GeneratedJestConfig,
-    BatchGenerationPlan
+    BatchGenerationPlan,
+    ReviewContext,
+    ReviewResult,
+    LearningContext,
+    LearningEntry
 } from '../interfaces/ILLMProvider';
 import { PROMPTS } from '../utils/prompts';
 import { Logger } from '../services/Logger';
@@ -388,6 +392,77 @@ Return ONLY a JSON object with corrected versions:
         } catch (error) {
             this.logger.error('[CoreProviderAdapter] Failed to parse version validation', error);
             return context.suggestedVersions; // Return original versions as fallback
+        }
+    }
+
+    async reviewTest(context: ReviewContext): Promise<ReviewResult> {
+        this.logger.debug('[CoreProviderAdapter] reviewTest called', { fileName: context.fileName });
+        
+        const result = await this.coreProvider.sendPrompt(context.systemPrompt!, context.userPrompt!);
+        
+        try {
+            // Check if the output has markdown blocks and strip them
+            let content = result.content.trim();
+            if (content.startsWith('```json')) {
+                content = content.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+            } else if (content.startsWith('```')) {
+                content = content.replace(/^```\n?/, '').replace(/\n?```$/, '');
+            }
+
+            const parsed = JSON.parse(content);
+            return {
+                passed: !!parsed.passed,
+                score: parsed.score || 0,
+                critique: parsed.critique || content,
+                suggestions: parsed.suggestions || []
+            };
+        } catch (e) {
+            this.logger.error('[CoreProviderAdapter] Failed to parse review JSON', e);
+            return {
+                passed: false,
+                critique: result.content,
+                score: 5,
+                suggestions: ["Failed to parse review as JSON"]
+            };
+        }
+    }
+
+    async generateLearningEntry(context: LearningContext): Promise<LearningEntry> {
+        this.logger.debug('[CoreProviderAdapter] generateLearningEntry called');
+        
+        const result = await this.coreProvider.sendPrompt(context.systemPrompt!, context.userPrompt!);
+        
+        try {
+             let content = result.content.trim();
+             if (content.startsWith('```json')) {
+                 content = content.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+             } else if (content.startsWith('```')) {
+                 content = content.replace(/^```\n?/, '').replace(/\n?```$/, '');
+             }
+
+             const parsed = JSON.parse(content);
+             return {
+                 timestamp: new Date().toISOString(),
+                 fileName: context.fileName,
+                 sourceCode: context.sourceCode,
+                 originalTestCode: context.originalTestCode,
+                 critique: context.critique,
+                 fixedTestCode: context.fixedTestCode,
+                 improvementDelta: parsed.improvementDelta || "See fixed and original code comparison",
+                 category: parsed.category || 'other'
+             };
+        } catch (e) {
+            this.logger.error('[CoreProviderAdapter] Failed to parse learning JSON', e);
+            return {
+                timestamp: new Date().toISOString(),
+                fileName: context.fileName,
+                sourceCode: context.sourceCode,
+                originalTestCode: context.originalTestCode,
+                critique: context.critique,
+                fixedTestCode: context.fixedTestCode,
+                improvementDelta: "Analysis failure: " + (e instanceof Error ? e.message : String(e)),
+                category: 'other'
+            };
         }
     }
 }

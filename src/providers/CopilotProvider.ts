@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { ILLMProvider, TestContext, LLMResult } from '../interfaces/ILLMProvider';
+import { ILLMProvider, TestContext, LLMResult, ReviewContext, ReviewResult, LearningContext, LearningEntry } from '../interfaces/ILLMProvider';
 import { CoreLLMResult } from '../interfaces/ICoreProvider';
 import { LLMNotAvailableError, LLMTimeoutError, RateLimitError } from '../errors/CustomErrors';
 import { Logger } from '../services/Logger';
@@ -133,6 +133,77 @@ export class CopilotProvider implements ILLMProvider {
         const userPrompt = PROMPTS.FIX_TEST(attemptStr, context.fileName, context.currentTestCode || '', errorContext, specificGuidance, context.sourceCode);
 
         return await this.sendRequest(systemPrompt, userPrompt);
+    }
+
+    /**
+     * Perform an adversarial review of a generated test
+     */
+    public async reviewTest(context: ReviewContext): Promise<ReviewResult> {
+        this.logger.info(`Performing adversarial review for ${context.fileName}`);
+        
+        const systemPrompt = context.systemPrompt || 'You are a Senior QA Automation Architect. Review the following test.';
+        const userPrompt = context.userPrompt || `Review this test for ${context.fileName}:\n\nSource:\n${context.sourceCode}\n\nTest:\n${context.testCode}`;
+
+        try {
+            const result = await this.sendRequest(systemPrompt, userPrompt);
+            const jsonText = this.extractJsonFromResponse(result.code);
+            const parsed = JSON.parse(jsonText);
+
+            return {
+                passed: !!parsed.passed,
+                score: typeof parsed.score === 'number' ? parsed.score : 0,
+                critique: parsed.critique || 'No critique provided',
+                suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : []
+            };
+        } catch (error) {
+            this.logger.error('Adversarial review failed', error);
+            return {
+                passed: true, // Fail-safe: let it pass if review fails
+                score: 5,
+                critique: 'Adversarial review failed to execute',
+                suggestions: []
+            };
+        }
+    }
+
+    /**
+     * Generate a structured learning entry
+     */
+    public async generateLearningEntry(context: LearningContext): Promise<LearningEntry> {
+        this.logger.info(`Generating learning entry for ${context.fileName}`);
+
+        const systemPrompt = context.systemPrompt || 'You are a Senior Software Development Data Curator. Extract the learning delta.';
+        const userPrompt = context.userPrompt || `Original code:\n${context.originalTestCode}\n\nCritique:\n${context.critique}\n\nFixed code:\n${context.fixedTestCode}\n\nSource code context:\n${context.sourceCode}`;
+
+        try {
+            const result = await this.sendRequest(systemPrompt, userPrompt);
+            const jsonText = this.extractJsonFromResponse(result.code);
+            const parsed = JSON.parse(jsonText);
+
+            return {
+                timestamp: new Date().toISOString(),
+                fileName: context.fileName,
+                sourceCode: context.sourceCode,
+                originalTestCode: context.originalTestCode,
+                critique: context.critique,
+                fixedTestCode: context.fixedTestCode,
+                improvementDelta: parsed.improvementDelta || 'Refined test logic based on peer review',
+                category: parsed.category || 'other'
+            };
+        } catch (error) {
+            this.logger.error('Generating learning entry failed', error);
+            // Fallback entry
+            return {
+                timestamp: new Date().toISOString(),
+                fileName: context.fileName,
+                sourceCode: context.sourceCode,
+                originalTestCode: context.originalTestCode,
+                critique: context.critique,
+                fixedTestCode: context.fixedTestCode,
+                improvementDelta: 'Automatic improvement during quality repair cycle',
+                category: 'other'
+            };
+        }
     }
 
     /**

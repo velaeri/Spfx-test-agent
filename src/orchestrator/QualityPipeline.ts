@@ -18,10 +18,11 @@ import { TestPlanBuilder, TestPlan, TestPlanItem, TestInventoryItem } from '../s
 import { PromptAssembler } from '../services/PromptAssembler';
 import { RepairLoop, RepairResult, TestExecutor, RepairContext } from '../services/RepairLoop';
 import { evaluateQualityGates } from '../policies/GoldenPolicy';
-import { ILLMProvider, LLMResult } from '../interfaces/ILLMProvider';
+import { ILLMProvider, LLMResult, ReviewResult, LearningEntry } from '../interfaces/ILLMProvider';
 import { CoverageService, CoverageReport } from '../services/CoverageService';
 import { TestRunner } from '../utils/TestRunner';
 import { ConfigService } from '../services/ConfigService';
+import { LearningService } from '../services/LearningService';
 
 // ────────────────────────────────────────────────────
 // Types
@@ -35,6 +36,8 @@ export interface PipelineConfig {
     maxIterations: number;        // per file repair loop
     maxFilesPerRun: number;
     coverageThreshold: number;    // percentage
+    deepMode?: boolean;           // Enable adversarial review
+    autoLearning?: boolean;       // Enable learning log capture
 }
 
 export interface PipelineResult {
@@ -44,6 +47,7 @@ export interface PipelineResult {
     testsDeleted: string[];
     testsPassing: number;
     testsFailing: number;
+    learningsCaptured?: number;
     coverageBefore: number | null;
     coverageAfter: number | null;
     plan: TestPlan;
@@ -58,6 +62,7 @@ interface FileGenerationResult {
     success: boolean;
     passed: boolean | null;     // null in dry-run
     error: string | null;
+    learningCaptured?: boolean;
 }
 
 // ────────────────────────────────────────────────────
@@ -70,6 +75,8 @@ const DEFAULT_CONFIG: PipelineConfig = {
     maxIterations: 3,
     maxFilesPerRun: 50,
     coverageThreshold: 80,
+    deepMode: false,
+    autoLearning: true,
 };
 
 // ────────────────────────────────────────────────────
@@ -85,6 +92,7 @@ export class QualityPipeline {
     private llmProvider: ILLMProvider;
     private coverageService: CoverageService;
     private testRunner: TestRunner;
+    private learningService: LearningService;
 
     constructor(llmProvider: ILLMProvider) {
         this.logger = Logger.getInstance();
@@ -95,6 +103,7 @@ export class QualityPipeline {
         this.llmProvider = llmProvider;
         this.coverageService = new CoverageService();
         this.testRunner = new TestRunner();
+        this.learningService = LearningService.getInstance();
     }
 
     /**
@@ -116,6 +125,7 @@ export class QualityPipeline {
             testsDeleted: [],
             testsPassing: 0,
             testsFailing: 0,
+            learningsCaptured: 0,
             coverageBefore: null,
             coverageAfter: null,
             plan: { p0: [], p1: [], p2: [], fillerToDelete: [], failingToRepair: [], estimatedTotalItems: 0, refactorSuggestions: [] },
@@ -165,7 +175,7 @@ export class QualityPipeline {
             // ── Fase 3: Plan ──
             stream.progress('Phase 3: Building test plan...');
             this.logger.info('Pipeline phase 3: Plan');
-            const plan = this.planBuilder.buildPlan(inspection, inventory, cfg.maxFilesPerRun);
+            const plan = this.planBuilder.buildPlan(inspection, inventory, cfg.maxFilesPerRun, cfg.deepMode);
             result.plan = plan;
 
             stream.markdown(`\n📝 **Test Plan**:\n- P0 (critical): ${plan.p0.length} files\n- P1 (important): ${plan.p1.length} files\n- P2 (nice to have): ${plan.p2.length} files\n- To repair: ${plan.failingToRepair.length}\n- To delete (filler): ${plan.fillerToDelete.length}\n`);
@@ -248,6 +258,12 @@ export class QualityPipeline {
                     } else if (genResult.passed === false) {
                         result.testsFailing++;
                     }
+
+                    if (genResult.learningCaptured) {
+                        if (result.learningsCaptured !== undefined) {
+                            result.learningsCaptured++;
+                        }
+                    }
                     // passed === null → dry-run, don't count
 
                     stream.markdown(`  ✅ ${path.basename(genResult.file)}${genResult.passed === true ? ' (passing)' : genResult.passed === false ? ' (failing)' : ''}\n`);
@@ -321,46 +337,54 @@ export class QualityPipeline {
                 ? fs.readFileSync(item.sourceFile, 'utf-8')
                 : '';
 
-            // Assemble prompt
-            const prompt = this.promptAssembler.assembleGeneratePrompt(
-                {
-                    planItem: item,
-                    sourceCode,
-                    availableMocks: inspection.existingMocks.map((m) => m.relativePath),
-                    existingPatterns,
-                    localRules,
-                },
-                inspection
-            );
+            let testCode: string;
 
-            // Call LLM
-            const llmResult: LLMResult = await this.llmProvider.generateTest({
-                sourceCode: prompt.userPrompt,
-                fileName: path.basename(item.sourceFile || item.testFile),
-                systemPrompt: prompt.systemPrompt,
-            });
+            if (item.action === 'refine' && fs.existsSync(item.testFile)) {
+                // Skip initial generation for refinement, use existing code
+                this.logger.info(`Refining existing test: ${item.testFile}`);
+                testCode = fs.readFileSync(item.testFile, 'utf-8');
+            } else {
+                // Assemble prompt
+                const prompt = this.promptAssembler.assembleGeneratePrompt(
+                    {
+                        planItem: item,
+                        sourceCode,
+                        availableMocks: inspection.existingMocks.map((m) => m.relativePath),
+                        existingPatterns,
+                        localRules,
+                    },
+                    inspection
+                );
 
-            if (!llmResult?.code) {
-                return { file: item.testFile, success: false, passed: null, error: 'LLM returned empty response' };
+                // Call LLM
+                const llmResult: LLMResult = await this.llmProvider.generateTest({
+                    sourceCode: prompt.userPrompt,
+                    fileName: path.basename(item.sourceFile || item.testFile),
+                    systemPrompt: prompt.systemPrompt,
+                });
+
+                if (!llmResult?.code) {
+                    return { file: item.testFile, success: false, passed: null, error: 'LLM returned empty response' };
+                }
+
+                // Extract test code
+                testCode = this.extractTestCode(llmResult.code);
+
+                // Quality gate check
+                const qgResult = evaluateQualityGates(testCode);
+                if (!qgResult.passed) {
+                    const failures = qgResult.results.filter((r) => !r.result.passed);
+                    this.logger.warn('Quality gates failed', { failures });
+                    // Continue anyway but log — the repair loop may fix issues
+                }
+
+                // Write test file
+                const testDir = path.dirname(item.testFile);
+                if (!fs.existsSync(testDir)) {
+                    fs.mkdirSync(testDir, { recursive: true });
+                }
+                fs.writeFileSync(item.testFile, testCode, 'utf-8');
             }
-
-            // Extract test code
-            const testCode = this.extractTestCode(llmResult.code);
-
-            // Quality gate check
-            const qgResult = evaluateQualityGates(testCode);
-            if (!qgResult.passed) {
-                const failures = qgResult.results.filter((r) => !r.result.passed);
-                this.logger.warn('Quality gates failed', { failures });
-                // Continue anyway but log — the repair loop may fix issues
-            }
-
-            // Write test file
-            const testDir = path.dirname(item.testFile);
-            if (!fs.existsSync(testDir)) {
-                fs.mkdirSync(testDir, { recursive: true });
-            }
-            fs.writeFileSync(item.testFile, testCode, 'utf-8');
 
             // Execute if capable
             if (cfg.mode === 'execution-capable') {
@@ -372,26 +396,95 @@ export class QualityPipeline {
 
                 const runResult = await executor.run(item.testFile, inspection.paths.root);
 
-                if (runResult.success) {
-                    return { file: item.testFile, success: true, passed: true, error: null };
+                let finalPassed = runResult.success;
+                let finalError = runResult.success ? null : runResult.output;
+
+                if (!runResult.success) {
+                    // Enter repair loop
+                    const repairCtx: RepairContext = {
+                        sourceCode,
+                        fileName: path.basename(item.sourceFile || item.testFile),
+                        testFilePath: item.testFile,
+                        workspaceRoot: inspection.paths.root,
+                        maxIterations: cfg.maxIterations,
+                    };
+
+                    const repairResult = await this.repairLoop.repair(repairCtx, executor);
+                    finalPassed = repairResult.passed;
+                    finalError = repairResult.passed ? null : repairResult.finalError;
                 }
 
-                // Enter repair loop
-                const repairCtx: RepairContext = {
-                    sourceCode,
-                    fileName: path.basename(item.sourceFile || item.testFile),
-                    testFilePath: item.testFile,
-                    workspaceRoot: inspection.paths.root,
-                    maxIterations: cfg.maxIterations,
-                };
+                // --- DEEP MODE: Adversarial Review ---
+                let learningCaptured = false;
+                if (finalPassed && cfg.deepMode) {
+                    const currentTestCode = fs.readFileSync(item.testFile, 'utf-8');
+                    const reviewPrompt = this.promptAssembler.assembleReviewPrompt({
+                        sourceCode,
+                        testCode: currentTestCode,
+                        fileName: path.basename(item.testFile)
+                    });
 
-                const repairResult = await this.repairLoop.repair(repairCtx, executor);
+                    const review = await this.llmProvider.reviewTest({
+                        sourceCode,
+                        testCode: currentTestCode,
+                        fileName: path.basename(item.testFile),
+                        systemPrompt: reviewPrompt.systemPrompt,
+                        userPrompt: reviewPrompt.userPrompt
+                    });
+
+                    if (!review.passed && review.score < 8) {
+                        this.logger.info(`Adversarial review failed (score: ${review.score}). Triggering quality repair...`);
+                        
+                        const fixResult = await this.llmProvider.fixTest({
+                            sourceCode,
+                            fileName: path.basename(item.testFile),
+                            currentTestCode: currentTestCode,
+                            errorContext: `QUALITY CRITIQUE (The test passed execution but needs architectural improvement):\n${review.critique}\n\nSUGGESTIONS:\n${review.suggestions.join('\n')}`,
+                            attempt: 1,
+                            maxAttempts: 1
+                        });
+
+                        if (fixResult.code) {
+                            const newTestCode = this.extractTestCode(fixResult.code);
+                            fs.writeFileSync(item.testFile, newTestCode, 'utf-8');
+                            
+                            // Re-verify that it still passes execution
+                            const runResultAgain = await executor.run(item.testFile, inspection.paths.root);
+                            if (runResultAgain.success) {
+                                // Capture learning
+                                if (cfg.autoLearning) {
+                                    const learningContext = {
+                                        sourceCode,
+                                        originalTestCode: currentTestCode,
+                                        critique: review.critique,
+                                        fixedTestCode: newTestCode,
+                                        fileName: path.basename(item.testFile)
+                                    };
+
+                                    const learningPrompt = this.promptAssembler.assembleLearningPrompt(learningContext);
+
+                                    const learningEntry = await this.llmProvider.generateLearningEntry({
+                                        ...learningContext,
+                                        systemPrompt: learningPrompt.systemPrompt,
+                                        userPrompt: learningPrompt.userPrompt
+                                    });
+                                    await this.learningService.logExperience(learningEntry, inspection.paths.root);
+                                    learningCaptured = true;
+                                }
+                            } else {
+                                this.logger.warn('Quality improvement broke the test. Reverting...');
+                                fs.writeFileSync(item.testFile, currentTestCode, 'utf-8');
+                            }
+                        }
+                    }
+                }
 
                 return {
                     file: item.testFile,
                     success: true,
-                    passed: repairResult.passed,
-                    error: repairResult.passed ? null : repairResult.finalError,
+                    passed: finalPassed,
+                    error: finalError,
+                    learningCaptured
                 };
             }
 
@@ -505,6 +598,9 @@ export class QualityPipeline {
         stream.markdown(`| Tests deleted (filler) | ${result.testsDeleted.length} |\n`);
         stream.markdown(`| Tests passing | ${result.testsPassing} |\n`);
         stream.markdown(`| Tests failing | ${result.testsFailing} |\n`);
+        if (result.learningsCaptured && result.learningsCaptured > 0) {
+            stream.markdown(`| Improvements documented | ${result.learningsCaptured} |\n`);
+        }
         if (result.coverageAfter !== null) {
             stream.markdown(`| Coverage | ${result.coverageAfter.toFixed(1)}% |\n`);
         }

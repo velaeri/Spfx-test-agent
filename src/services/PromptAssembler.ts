@@ -51,6 +51,20 @@ export interface FixPromptInput {
     dependencyContext?: string;
 }
 
+export interface ReviewPromptInput {
+    sourceCode: string;
+    testCode: string;
+    fileName: string;
+}
+
+export interface LearningPromptInput {
+    sourceCode: string;
+    originalTestCode: string;
+    critique: string;
+    fixedTestCode: string;
+    fileName: string;
+}
+
 // ────────────────────────────────────────────────────
 // Templates
 // ────────────────────────────────────────────────────
@@ -260,6 +274,90 @@ export class PromptAssembler {
     ): AssembledPrompt {
         const systemPrompt = this.buildSystemPrompt(inspection);
         const userPrompt = this.buildFixUserPrompt(input);
+
+        return { systemPrompt, userPrompt };
+    }
+
+    /**
+     * Assemble prompt for adversarial review.
+     */
+    assembleReviewPrompt(input: ReviewPromptInput): AssembledPrompt {
+        const systemPrompt = `You are a Senior QA Automation Architect and a brutal code critic.
+Your mission is to identify weaknesses, lazy patterns, and missing edge cases in unit tests.
+You are objective, technical, and focused on "True Quality" over just "Green Tests".
+
+CRITICAL EVALUATION CRITERIA:
+1. **Mock Integrity**: Are the mocks too simplistic? Do they return realistic data for the component's logic?
+2. **Assertion Value**: Avoid weak assertions like .toBeDefined() or .toBeTruthy() when specific values should be checked.
+3. **SPFx Context**: If this is a SharePoint test, does it properly handle the depth of the context (webpartContext, pageContext, etc.)?
+4. **Error Paths**: Does the test genuinely verify what happens when a service fails, or is it just testing the success path?
+5. **Logic Coverage**: Does it test boundary conditions (empty arrays, nulls, long strings) mentioned or implied in the source code?
+
+You must respond in JSON format with exactly these properties:
+{
+  "passed": boolean, // true if the test is of professional grade, false if it needs improvement
+  "score": number, // 0-10 (high is better)
+  "critique": "A concise and honest explanation of why the test is good or needs work",
+  "suggestions": ["specific improvement 1", "specific improvement 2"]
+}`;
+
+        const userPrompt = `# CODE REVIEW REQUEST
+**File:** \`${input.fileName}\`
+
+## SOURCE CODE (Target)
+\`\`\`typescript
+${input.sourceCode}
+\`\`\`
+
+## UNIT TEST TO REVIEW
+\`\`\`typescript
+${input.testCode}
+\`\`\`
+
+Analyze the test against the source code and provide your technical verdict in JSON format.`;
+
+        return { systemPrompt, userPrompt };
+    }
+
+    /**
+     * Assemble prompt for the Learning Agent to document the improvement delta.
+     */
+    assembleLearningPrompt(input: LearningPromptInput): AssembledPrompt {
+        const systemPrompt = `You are a Senior Software Development Data Curator.
+Your task is to analyze an improvement cycle where a weak test was criticized and then fixed.
+You must extract the "learning core" from this experience to help improve future test generation logic.
+
+Your output will be used to build a knowledge base of "Mediocore vs Professional" testing patterns.
+
+Respond in JSON format:
+{
+  "improvementDelta": "A technical summary of what was upgraded (e.g., 'Switched from shallow object mocks to full interface simulation')",
+  "category": "mocking" | "logic" | "edge-case" | "spfx-context" | "other",
+  "reasoning": "Why the original test was deficient and why the fix is superior"
+}`;
+
+        const userPrompt = `# LEARNING EXPERIENCE CAPTURE
+**File:** \`${input.fileName}\`
+
+## SOURCE CODE
+\`\`\`typescript
+${input.sourceCode}
+\`\`\`
+
+## ORIGINAL (WEAK) TEST
+\`\`\`typescript
+${input.originalTestCode}
+\`\`\`
+
+## CRITIQUE RECEIVED
+${input.critique}
+
+## FINAL (HIGH QUALITY) TEST
+\`\`\`typescript
+${input.fixedTestCode}
+\`\`\`
+
+Document the technical improvement delta in JSON format.`;
 
         return { systemPrompt, userPrompt };
     }

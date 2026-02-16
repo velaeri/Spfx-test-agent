@@ -20,6 +20,54 @@ export interface TestContext {
 }
 
 /**
+ * Context for adversarial review
+ */
+export interface ReviewContext {
+    sourceCode: string;
+    testCode: string;
+    fileName: string;
+    systemPrompt?: string;
+    userPrompt?: string;
+}
+
+/**
+ * Result from adversarial review
+ */
+export interface ReviewResult {
+    passed: boolean;
+    score: number; // 0-10
+    critique: string;
+    suggestions: string[];
+}
+
+/**
+ * Context for learning capture
+ */
+export interface LearningContext {
+    sourceCode: string;
+    originalTestCode: string;
+    critique: string;
+    fixedTestCode: string;
+    fileName: string;
+    systemPrompt?: string;
+    userPrompt?: string;
+}
+
+/**
+ * Structured learning entry for dataset improvements
+ */
+export interface LearningEntry {
+    timestamp: string;
+    fileName: string;
+    sourceCode: string;
+    originalTestCode: string;
+    critique: string;
+    fixedTestCode: string;
+    improvementDelta: string;
+    category: 'mocking' | 'logic' | 'edge-case' | 'spfx-context' | 'other';
+}
+
+/**
  * Result from LLM generation
  */
 export interface LLMResult {
@@ -97,6 +145,16 @@ export interface ILLMProvider extends ICoreProvider {
      * Fix a failing test based on error output
      */
     fixTest(context: TestContext): Promise<LLMResult>;
+
+    /**
+     * Perform an adversarial review of a generated test
+     */
+    reviewTest(context: ReviewContext): Promise<ReviewResult>;
+
+    /**
+     * Generate a structured learning entry summarizing an improvement
+     */
+    generateLearningEntry(context: LearningContext): Promise<LearningEntry>;
 
     /**
      * Detect missing dependencies based on package.json content

@@ -1409,6 +1409,42 @@ export async function handleGenerateQualityRequest(
 }
 
 /**
+ * Deep Mode - Single File/Targeted Quality Pipeline
+ */
+export async function handleGenerateDeepRequest(
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    targetPath?: string
+): Promise<vscode.ChatResult> {
+    stream.markdown('## 🧠 Deep Generation Mode\n');
+    stream.markdown('Activando arquitectura adversaria: Actor + Crítico + Documentador de aprendizaje.\n\n');
+    
+    return handleGenerateQualityRequest(stream, token, targetPath, {
+        deepMode: true,
+        autoLearning: true,
+        maxFilesPerRun: 3 // Small batch / targeted
+    });
+}
+
+/**
+ * Deep Mode - Batch Quality Pipeline
+ */
+export async function handleGenerateAllDeepRequest(
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    targetPath?: string
+): Promise<vscode.ChatResult> {
+    stream.markdown('## 🧠 Batch Deep Generation Mode\n');
+    stream.markdown('Ejecutando pipeline de calidad en profundidad para todo el proyecto.\n\n');
+    
+    return handleGenerateQualityRequest(stream, token, targetPath, {
+        deepMode: true,
+        autoLearning: true,
+        maxFilesPerRun: 20 // Large batch
+    });
+}
+
+/**
  * Centralized error handling with user-friendly messages
  */
 export function handleError(
